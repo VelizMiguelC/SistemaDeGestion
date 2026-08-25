@@ -1,0 +1,44 @@
+name: inventario_app
+description: "App multiplataforma (iOS y Web) para administrar stock y finanzas de un negocio de iPhones e insumos."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI
+  cupertino_icons: ^1.0.8
+  google_fonts: ^8.2.1
+  fl_chart: ^1.2.0
+
+  # Gestión de estado
+  provider: ^6.1.2
+
+  # Firebase
+  firebase_core: ^4.13.0
+  cloud_firestore: ^6.8.0
+  firebase_auth: ^6.5.7
+
+  # Utilidades
+  intl: ^0.20.3
+  uuid: ^4.5.1
+  url_launcher: ^6.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+# NOTA:
+# Antes de compilar, corré:
+#   flutter pub get
+# y luego:
+#   flutterfire configure
+# para generar firebase_options.dart y conectar el proyecto a tu proyecto de Firebase.
