@@ -1,20 +1,34 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
-import '../main.dart' show AndroidProvider, AppDrawer, GastoProvider, IPhoneStockProvider;
+import '../main.dart'
+    show
+        AndroidProvider,
+        AppDrawer,
+        DeudaProvider,
+        GastoProvider,
+        IPhoneStockProvider,
+        IngresoExtraProvider,
+        PagoProvider,
+        VentaAccesorioProvider;
 import '../models/android_model.dart';
+import '../models/deuda_model.dart';
 import '../models/gasto_model.dart';
+import '../models/ingreso_extra_model.dart';
 import '../models/iphone_model.dart';
+import '../models/pago_model.dart';
+import '../models/venta_accesorio_model.dart';
+import '../services/dolar_blue_service.dart';
+import '../services/reportes_calculator.dart';
 
 final _formatoUsd = NumberFormat.currency(locale: 'en_US', symbol: 'USD \$', decimalDigits: 0);
 
-/// Documento con el tipo de cambio manual USD → ARS (el mismo que usa el
-/// Dashboard), necesario para poder sumar los gastos operativos -que pueden
-/// cargarse en ARS o en USD- en una sola métrica en dólares.
-final _tasaCambioRef = FirebaseFirestore.instance.collection('configuracion').doc('tasaCambio');
+/// Cotización de referencia usada solo si todavía no llegó ninguna
+/// respuesta del blue, o si la consulta a la API falla -necesaria para
+/// poder sumar los gastos operativos (que pueden cargarse en ARS o en USD)
+/// en una sola métrica en dólares sin dejar la pantalla en blanco-.
 const double _tasaCambioPorDefecto = 1000;
 
 const List<String> _nombresMeses = [
@@ -73,11 +87,52 @@ class _ReportesScreenState extends State<ReportesScreen> {
   int _mes = DateTime.now().month;
   int _anio = DateTime.now().year;
 
+  /// Cotización del dólar blue usada para convertir gastos/otros ingresos
+  /// en pesos a USD (reemplaza al tipo de cambio manual que antes se
+  /// guardaba en Firestore -el mismo cambio que en el Dashboard-). Mientras
+  /// no resuelve (o si la consulta falla), se usa [_tasaCambioPorDefecto].
+  double? _tasaBlue;
+
+  @override
+  void initState() {
+    super.initState();
+    _buscarBlue();
+  }
+
+  Future<void> _buscarBlue() async {
+    final tasa = await Future.any([
+      DolarBlueService().obtenerCotizacionVenta(),
+      Future.delayed(const Duration(seconds: 10), () => null),
+    ]);
+    if (!mounted) return;
+    setState(() => _tasaBlue = tasa);
+  }
+
   /// Convierte un gasto a su equivalente en USD usando la tasa de cambio.
   double _gastoEnUsd(GastoModel gasto, double tasaCambio) {
     if (gasto.moneda == MonedaGasto.usd) return gasto.monto;
     if (tasaCambio == 0) return 0;
     return gasto.monto / tasaCambio;
+  }
+
+  /// Convierte un ingreso extra (reparaciones/otros) a su equivalente en USD.
+  double _ingresoExtraEnUsd(IngresoExtraModel ingreso, double tasaCambio) {
+    if (ingreso.moneda == MonedaGasto.usd) return ingreso.monto;
+    if (tasaCambio == 0) return 0;
+    return ingreso.monto / tasaCambio;
+  }
+
+  /// Ingreso/costo de una venta de accesorio en USD. Igual que gastos y
+  /// otros ingresos, Stock de Empresa se carga en pesos (no en USD como
+  /// iPhones/Android), así que hace falta la misma conversión acá.
+  double _ventaAccesorioIngresoUsd(VentaAccesorioModel venta, double tasaCambio) {
+    if (tasaCambio == 0) return 0;
+    return venta.ingresoTotal / tasaCambio;
+  }
+
+  double _ventaAccesorioCostoUsd(VentaAccesorioModel venta, double tasaCambio) {
+    if (tasaCambio == 0) return 0;
+    return venta.costoTotal / tasaCambio;
   }
 
   bool _fechaEnPeriodo(DateTime fecha, {int? mes}) {
@@ -95,6 +150,10 @@ class _ReportesScreenState extends State<ReportesScreen> {
     final iphoneProvider = context.watch<IPhoneStockProvider>();
     final androidProvider = context.watch<AndroidProvider>();
     final gastoProvider = context.watch<GastoProvider>();
+    final deudaProvider = context.watch<DeudaProvider>();
+    final pagoProvider = context.watch<PagoProvider>();
+    final ingresoExtraProvider = context.watch<IngresoExtraProvider>();
+    final ventaAccesorioProvider = context.watch<VentaAccesorioProvider>();
     final theme = Theme.of(context);
 
     return Scaffold(
@@ -111,18 +170,36 @@ class _ReportesScreenState extends State<ReportesScreen> {
               return StreamBuilder<List<GastoModel>>(
                 stream: gastoProvider.stream,
                 builder: (context, snapshotGastos) {
-                  return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                    stream: _tasaCambioRef.snapshots(),
-                    builder: (context, snapshotTasa) {
-                      final cargando = !snapshotIphones.hasData ||
+                  return StreamBuilder<List<DeudaModel>>(
+                    stream: deudaProvider.stream,
+                    builder: (context, snapshotDeudas) {
+                      return StreamBuilder<List<PagoModel>>(
+                        stream: pagoProvider.stream,
+                        builder: (context, snapshotPagos) {
+                          return StreamBuilder<List<IngresoExtraModel>>(
+                            stream: ingresoExtraProvider.stream,
+                            builder: (context, snapshotIngresosExtra) {
+                              return StreamBuilder<List<VentaAccesorioModel>>(
+                                stream: ventaAccesorioProvider.stream,
+                                builder: (context, snapshotVentasAccesorios) {
+                                      final cargando = !snapshotIphones.hasData ||
                           !snapshotAndroids.hasData ||
-                          !snapshotGastos.hasData;
+                          !snapshotGastos.hasData ||
+                          !snapshotDeudas.hasData ||
+                          !snapshotPagos.hasData ||
+                          !snapshotIngresosExtra.hasData ||
+                          !snapshotVentasAccesorios.hasData;
                       if (cargando) {
                         return const Center(child: CircularProgressIndicator());
                       }
 
-                      final error =
-                          snapshotIphones.error ?? snapshotAndroids.error ?? snapshotGastos.error;
+                      final error = snapshotIphones.error ??
+                          snapshotAndroids.error ??
+                          snapshotGastos.error ??
+                          snapshotDeudas.error ??
+                          snapshotPagos.error ??
+                          snapshotIngresosExtra.error ??
+                          snapshotVentasAccesorios.error;
                       if (error != null) {
                         return Center(child: Text('Error al cargar el reporte: $error'));
                       }
@@ -130,9 +207,11 @@ class _ReportesScreenState extends State<ReportesScreen> {
                       final todosIphones = snapshotIphones.data!;
                       final todosAndroids = snapshotAndroids.data!;
                       final todosGastos = snapshotGastos.data!;
-                      final tasaCambio =
-                          (snapshotTasa.data?.data()?['valor'] as num?)?.toDouble() ??
-                              _tasaCambioPorDefecto;
+                      final todasDeudas = snapshotDeudas.data!;
+                      final todosPagos = snapshotPagos.data!;
+                      final todosIngresosExtra = snapshotIngresosExtra.data!;
+                      final todasVentasAccesorios = snapshotVentasAccesorios.data!;
+                      final tasaCambio = _tasaBlue ?? _tasaCambioPorDefecto;
 
                       final mesFiltro = _vista == VistaReporte.mensual ? _mes : null;
 
@@ -146,23 +225,83 @@ class _ReportesScreenState extends State<ReportesScreen> {
                       final gastosPeriodo = todosGastos
                           .where((g) => _fechaEnPeriodo(g.fecha, mes: mesFiltro))
                           .toList();
+                      final ingresosExtraPeriodo = todosIngresosExtra
+                          .where((i) => _fechaEnPeriodo(i.fecha, mes: mesFiltro))
+                          .toList();
+                      final ventasAccesoriosPeriodo = todasVentasAccesorios
+                          .where((v) => _fechaEnPeriodo(v.fecha, mes: mesFiltro))
+                          .toList();
 
-                      // Ingresos, costo y ganancia bruta ahora combinan las
-                      // ventas de iPhones y de equipos Android.
-                      final ingresosUsd = iphonesVendidosPeriodo
-                              .fold<double>(0, (s, e) => s + (e.precioVenta ?? 0)) +
-                          androidsVendidosPeriodo.fold<double>(0, (s, e) => s + (e.precioVenta ?? 0));
-                      final costoUsd =
-                          iphonesVendidosPeriodo.fold<double>(0, (s, e) => s + e.costo) +
-                              androidsVendidosPeriodo.fold<double>(0, (s, e) => s + e.costo);
+                      // Ingresos, costo y ganancia bruta combinan las ventas
+                      // de contado de iPhones/Android con la porción cobrada
+                      // de las ventas financiadas (ver calcularIngresosCosto).
+                      final ingresosCosto = calcularIngresosCosto(
+                        iphones: todosIphones,
+                        androids: todosAndroids,
+                        deudas: todasDeudas,
+                        pagos: todosPagos,
+                        enPeriodo: (fecha) => _fechaEnPeriodo(fecha, mes: mesFiltro),
+                      );
+                      final ingresosUsd = ingresosCosto.ingresos;
+                      final costoUsd = ingresosCosto.costo;
                       final gananciaBrutaUsd = ingresosUsd - costoUsd;
+
+                      // Solo ventas de contado: excluye por completo los
+                      // equipos financiados (ver calcularIngresosCostoContado).
+                      final contado = calcularIngresosCostoContado(
+                        iphones: todosIphones,
+                        androids: todosAndroids,
+                        deudas: todasDeudas,
+                        enPeriodo: (fecha) => _fechaEnPeriodo(fecha, mes: mesFiltro),
+                      );
+                      final ingresosContadoUsd = contado.ingresos;
+                      final costoContadoUsd = contado.costo;
+                      final gananciaContadoUsd = ingresosContadoUsd - costoContadoUsd;
+
+                      final ingresosExtraUsd = ingresosExtraPeriodo.fold<double>(
+                        0,
+                        (s, i) => s + _ingresoExtraEnUsd(i, tasaCambio),
+                      );
+                      // Accesorios (Stock de Empresa): siempre son ventas de
+                      // contado -no hay concepto de "financiado" acá-, así
+                      // que suman igual en la ganancia neta real y en la de
+                      // "solo contado".
+                      final ingresosAccesoriosUsd = ventasAccesoriosPeriodo.fold<double>(
+                        0,
+                        (s, v) => s + _ventaAccesorioIngresoUsd(v, tasaCambio),
+                      );
+                      final costoAccesoriosUsd = ventasAccesoriosPeriodo.fold<double>(
+                        0,
+                        (s, v) => s + _ventaAccesorioCostoUsd(v, tasaCambio),
+                      );
+                      final gananciaAccesoriosUsd = ingresosAccesoriosUsd - costoAccesoriosUsd;
                       final gastosOperativosUsd = gastosPeriodo.fold<double>(
                         0,
                         (s, g) => s + _gastoEnUsd(g, tasaCambio),
                       );
-                      final gananciaNetaUsd = gananciaBrutaUsd - gastosOperativosUsd;
+                      final gananciaNetaUsd = gananciaBrutaUsd +
+                          gananciaAccesoriosUsd +
+                          ingresosExtraUsd -
+                          gastosOperativosUsd;
+                      // Igual que gananciaNetaUsd, pero con la ganancia bruta
+                      // "de contado" (excluye financiadas por completo) en
+                      // vez de la que incluye lo cobrado de cuotas.
+                      final gananciaNetaContadoUsd = gananciaContadoUsd +
+                          gananciaAccesoriosUsd +
+                          ingresosExtraUsd -
+                          gastosOperativosUsd;
                       final equiposVendidosPeriodo =
                           iphonesVendidosPeriodo.length + androidsVendidosPeriodo.length;
+                      final idsFinanciadosPeriodo = <String>{
+                        for (final d in todasDeudas)
+                          if (d.idEquipoVinculado != null) d.idEquipoVinculado!,
+                      };
+                      final equiposContadoPeriodo = iphonesVendidosPeriodo
+                              .where((e) => !idsFinanciadosPeriodo.contains(e.id))
+                              .length +
+                          androidsVendidosPeriodo
+                              .where((e) => !idsFinanciadosPeriodo.contains(e.id))
+                              .length;
 
                       // Desglose de gastos por categoría (en USD equivalente).
                       final Map<CategoriaGasto, double> porCategoria = {};
@@ -187,11 +326,14 @@ class _ReportesScreenState extends State<ReportesScreen> {
                             .where((e) => e.fechaVenta != null)
                             .map((e) => e.fechaVenta!.year),
                         ...todosGastos.map((g) => g.fecha.year),
+                        ...todosPagos.map((p) => p.fechaPago.year),
+                        ...todasVentasAccesorios.map((v) => v.fecha.year),
                       }.toList()
                         ..sort((a, b) => b.compareTo(a));
 
                       // Desglose mensual acumulado (solo en vista anual),
-                      // combinando también las ventas de Android.
+                      // combinando también las ventas de Android y la
+                      // porción cobrada de ventas financiadas.
                       List<_ResumenMes>? resumenMensual;
                       if (_vista == VistaReporte.anual) {
                         resumenMensual = List.generate(12, (i) {
@@ -204,23 +346,59 @@ class _ReportesScreenState extends State<ReportesScreen> {
                           );
                           final gastosMes =
                               todosGastos.where((g) => _fechaEnPeriodo(g.fecha, mes: mes));
+                          final ingresosExtraMes = todosIngresosExtra
+                              .where((ing) => _fechaEnPeriodo(ing.fecha, mes: mes));
+                          final ventasAccesoriosMes = todasVentasAccesorios
+                              .where((v) => _fechaEnPeriodo(v.fecha, mes: mes));
 
-                          final ingresosMes =
-                              iphonesMes.fold<double>(0, (s, e) => s + (e.precioVenta ?? 0)) +
-                                  androidsMes.fold<double>(0, (s, e) => s + (e.precioVenta ?? 0));
-                          final costoMes = iphonesMes.fold<double>(0, (s, e) => s + e.costo) +
-                              androidsMes.fold<double>(0, (s, e) => s + e.costo);
+                          final ingresosCostoMes = calcularIngresosCosto(
+                            iphones: todosIphones,
+                            androids: todosAndroids,
+                            deudas: todasDeudas,
+                            pagos: todosPagos,
+                            enPeriodo: (fecha) => _fechaEnPeriodo(fecha, mes: mes),
+                          );
+                          final ingresosCostoSuavizadoMes = calcularIngresosCostoSuavizado(
+                            iphones: todosIphones,
+                            androids: todosAndroids,
+                            deudas: todasDeudas,
+                            pagos: todosPagos,
+                            enPeriodo: (fecha) => _fechaEnPeriodo(fecha, mes: mes),
+                          );
                           final gastosMesUsd = gastosMes.fold<double>(
                             0,
                             (s, g) => s + _gastoEnUsd(g, tasaCambio),
                           );
+                          final ingresosExtraMesUsd = ingresosExtraMes.fold<double>(
+                            0,
+                            (s, ing) => s + _ingresoExtraEnUsd(ing, tasaCambio),
+                          );
+                          final ingresosAccesoriosMesUsd = ventasAccesoriosMes.fold<double>(
+                            0,
+                            (s, v) => s + _ventaAccesorioIngresoUsd(v, tasaCambio),
+                          );
+                          final costoAccesoriosMesUsd = ventasAccesoriosMes.fold<double>(
+                            0,
+                            (s, v) => s + _ventaAccesorioCostoUsd(v, tasaCambio),
+                          );
 
                           return _ResumenMes(
                             mes: mes,
-                            ingresos: ingresosMes,
-                            costo: costoMes,
+                            // Los accesorios se suman acá directo (no tienen
+                            // concepto de "financiado") para que Ganancia
+                            // bruta y Ganancia neta del mes reflejen todo el
+                            // negocio, no solo iPhones/Android.
+                            ingresos: ingresosCostoMes.ingresos + ingresosAccesoriosMesUsd,
+                            costo: ingresosCostoMes.costo + costoAccesoriosMesUsd,
                             gastosUsd: gastosMesUsd,
+                            ingresosExtraUsd: ingresosExtraMesUsd,
                             equiposVendidos: iphonesMes.length + androidsMes.length,
+                            gananciaOperativaUsd: ingresosCostoSuavizadoMes.ingresos -
+                                ingresosCostoSuavizadoMes.costo +
+                                ingresosAccesoriosMesUsd -
+                                costoAccesoriosMesUsd +
+                                ingresosExtraMesUsd -
+                                gastosMesUsd,
                           );
                         });
                       }
@@ -240,7 +418,19 @@ class _ReportesScreenState extends State<ReportesScreen> {
                               onAnioChanged: (a) => setState(() => _anio = a),
                             ),
                             const SizedBox(height: 20),
-                            _GananciaNetaBanner(monto: gananciaNetaUsd),
+                            _GananciaNetaBanner(
+                              monto: gananciaNetaUsd,
+                              subtitulo: 'Ganancia bruta (iPhones + Android) + Accesorios + '
+                                  'Otros ingresos − Gastos operativos',
+                            ),
+                            const SizedBox(height: 12),
+                            _GananciaNetaBanner(
+                              monto: gananciaNetaContadoUsd,
+                              titulo: 'Ganancia neta (solo contado)',
+                              subtitulo: 'Igual que arriba, pero excluye por completo los '
+                                  'equipos financiados (estén pagados o no)',
+                              icono: Icons.point_of_sale_outlined,
+                            ),
                             const SizedBox(height: 16),
                             Text(
                               '$equiposVendidosPeriodo equipos vendidos (iPhones + Android)',
@@ -282,6 +472,73 @@ class _ReportesScreenState extends State<ReportesScreen> {
                                   titulo: 'Gastos operativos',
                                   valor: _formatoUsd.format(gastosOperativosUsd),
                                 ),
+                                _KpiCard(
+                                  icon: Icons.handyman_outlined,
+                                  color: _colorIngresos,
+                                  titulo: 'Otros ingresos',
+                                  subtitulo: 'Reparaciones y varios',
+                                  valor: _formatoUsd.format(ingresosExtraUsd),
+                                ),
+                                _KpiCard(
+                                  icon: Icons.inventory_2_outlined,
+                                  color: _colorGananciaBruta,
+                                  titulo: 'Ganancia accesorios',
+                                  subtitulo: 'Stock de Empresa',
+                                  valor: _formatoUsd.format(gananciaAccesoriosUsd),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 28),
+                            Text(
+                              'Solo ventas de contado',
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Excluye por completo los equipos financiados (estén pagados '
+                              'o no) -para que tengas una idea clara de lo que vendiste y '
+                              'cobraste, sin el costo de una financiación en curso '
+                              'mezclado acá-.',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '$equiposContadoPeriodo equipos de contado (de $equiposVendidosPeriodo vendidos en total)',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            GridView.count(
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              crossAxisCount: 3,
+                              mainAxisSpacing: 12,
+                              crossAxisSpacing: 12,
+                              childAspectRatio: 1.05,
+                              children: [
+                                _KpiCard(
+                                  icon: Icons.arrow_downward,
+                                  color: _colorIngresos,
+                                  titulo: 'Ingresos',
+                                  valor: _formatoUsd.format(ingresosContadoUsd),
+                                ),
+                                _KpiCard(
+                                  icon: Icons.attach_money,
+                                  color: _colorCosto,
+                                  titulo: 'Costo',
+                                  valor: _formatoUsd.format(costoContadoUsd),
+                                ),
+                                _KpiCard(
+                                  icon: Icons.trending_up,
+                                  color: _colorGananciaBruta,
+                                  titulo: 'Ganancia',
+                                  valor: _formatoUsd.format(gananciaContadoUsd),
+                                ),
                               ],
                             ),
                             const SizedBox(height: 24),
@@ -317,6 +574,25 @@ class _ReportesScreenState extends State<ReportesScreen> {
                               _GananciasVsGastosChart(filas: resumenMensual),
                               const SizedBox(height: 24),
                               Text(
+                                'Ganancia operativa · $_anio',
+                                style: theme.textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'El costo de una venta financiada se reparte a medida que se '
+                                'cobra cada cuota, igual que el ingreso -así una venta grande '
+                                'recién financiada no aparece como pérdida el mes en que se '
+                                'vendió-.',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              _GananciaOperativaChart(filas: resumenMensual),
+                              const SizedBox(height: 24),
+                              Text(
                                 'Desglose mensual $_anio',
                                 style: theme.textTheme.titleMedium?.copyWith(
                                   fontWeight: FontWeight.w700,
@@ -327,6 +603,12 @@ class _ReportesScreenState extends State<ReportesScreen> {
                             ],
                           ],
                         ),
+                      );
+                                },
+                              );
+                            },
+                          );
+                        },
                       );
                     },
                   );
@@ -345,18 +627,27 @@ class _ResumenMes {
   final double ingresos;
   final double costo;
   final double gastosUsd;
+  final double ingresosExtraUsd;
   final int equiposVendidos;
+
+  /// Ganancia "operativa" del mes (ver `calcularIngresosCostoSuavizado`):
+  /// a diferencia de [gananciaNeta], el costo de una venta financiada
+  /// también se reparte a medida que se cobra, así una venta grande recién
+  /// vendida no aparece como pérdida ese mes.
+  final double gananciaOperativaUsd;
 
   const _ResumenMes({
     required this.mes,
     required this.ingresos,
     required this.costo,
     required this.gastosUsd,
+    required this.ingresosExtraUsd,
     required this.equiposVendidos,
+    required this.gananciaOperativaUsd,
   });
 
   double get gananciaBruta => ingresos - costo;
-  double get gananciaNeta => gananciaBruta - gastosUsd;
+  double get gananciaNeta => gananciaBruta + ingresosExtraUsd - gastosUsd;
 }
 
 /// -----------------------------------------------------------------------
@@ -459,7 +750,16 @@ class _SelectorPeriodo extends StatelessWidget {
 
 class _GananciaNetaBanner extends StatelessWidget {
   final double monto;
-  const _GananciaNetaBanner({required this.monto});
+  final String titulo;
+  final String subtitulo;
+  final IconData icono;
+
+  const _GananciaNetaBanner({
+    required this.monto,
+    this.titulo = 'Ganancia neta real',
+    this.subtitulo = 'Ganancia bruta (iPhones + Android) + Otros ingresos − Gastos operativos',
+    this.icono = Icons.account_balance_wallet_outlined,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -483,10 +783,10 @@ class _GananciaNetaBanner extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.account_balance_wallet_outlined, color: color, size: 18),
+              Icon(icono, color: color, size: 18),
               const SizedBox(width: 8),
               Text(
-                'Ganancia neta real',
+                titulo,
                 style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
               ),
             ],
@@ -500,10 +800,7 @@ class _GananciaNetaBanner extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 2),
-          Text(
-            'Ganancia bruta (iPhones + Android) − Gastos operativos',
-            style: theme.textTheme.bodySmall,
-          ),
+          Text(subtitulo, style: theme.textTheme.bodySmall),
         ],
       ),
     );
@@ -729,6 +1026,101 @@ class _GananciasVsGastosChart extends StatelessWidget {
               _LeyendaChip(color: _colorGastosOperativos, label: 'Gastos'),
             ],
           ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 200,
+            child: BarChart(
+              BarChartData(
+                barGroups: barGroups,
+                maxY: maxY,
+                minY: minY,
+                alignment: BarChartAlignment.spaceAround,
+                gridData: const FlGridData(show: false),
+                borderData: FlBorderData(show: false),
+                titlesData: FlTitlesData(
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 24,
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        if (i < 0 || i >= _nombresMesesAbrev.length) {
+                          return const SizedBox.shrink();
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            _nombresMesesAbrev[i],
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// -----------------------------------------------------------------------
+/// GRÁFICO: GANANCIA OPERATIVA (mes a mes, sin el golpe de costo por
+/// financiar una venta que todavía no se cobró)
+/// -----------------------------------------------------------------------
+
+class _GananciaOperativaChart extends StatelessWidget {
+  final List<_ResumenMes> filas;
+  const _GananciaOperativaChart({required this.filas});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    const color = _colorGananciaBruta;
+
+    final valores = filas.map((r) => r.gananciaOperativaUsd).toList();
+    final maxValor = valores.fold<double>(0, (m, v) => v > m ? v : m);
+    final minValor = valores.fold<double>(0, (m, v) => v < m ? v : m);
+    final maxY = maxValor <= 0 ? 100.0 : maxValor * 1.25;
+    final minY = minValor >= 0 ? 0.0 : minValor * 1.25;
+
+    final barGroups = filas.asMap().entries.map((entry) {
+      final i = entry.key;
+      final r = entry.value;
+      return BarChartGroupData(
+        x: i,
+        barRods: [
+          BarChartRodData(
+            toY: r.gananciaOperativaUsd,
+            color: r.gananciaOperativaUsd >= 0 ? color : theme.colorScheme.error,
+            width: 10,
+            borderRadius: BorderRadius.circular(3),
+          ),
+        ],
+      );
+    }).toList();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 16, 16, 12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _LeyendaChip(color: color, label: 'Ganancia operativa'),
           const SizedBox(height: 12),
           SizedBox(
             height: 200,

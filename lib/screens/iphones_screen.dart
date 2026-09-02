@@ -3,7 +3,10 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../main.dart' show IPhoneStockProvider, AppDrawer;
+import '../models/deuda_model.dart' show TipoDeuda;
 import '../models/iphone_model.dart';
+import '../widgets/cotizacion_blue_field.dart';
+import 'finanzas_screen.dart' show DeudaFormSheet;
 
 final _formatoUsd = NumberFormat.currency(locale: 'en_US', symbol: 'USD \$', decimalDigits: 0);
 final _formatoFecha = DateFormat('dd/MM/yyyy');
@@ -136,6 +139,51 @@ class _IPhonesScreenState extends State<IPhonesScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Equipo marcado como vendido')),
         );
+      }
+
+      // Venta financiada (en cuotas): se abre el mismo formulario de cuenta
+      // que usa Finanzas, prellenado con el monto/concepto/fecha de la
+      // venta y vinculado a este equipo -así el balance reconoce la
+      // ganancia a medida que se cobra cada cuota, no toda de una vez el
+      // día de la venta (ver reportes_screen.dart)-. El usuario solo tiene
+      // que elegir o crear el cliente.
+      if (resultado.financiada && mounted) {
+        // El monto NO se prellena: el precio de venta del equipo está en
+        // USD, pero las cuentas de Finanzas siempre están en pesos (no
+        // tienen campo de moneda) -acá el usuario carga el monto real que
+        // va a financiar en pesos, que no tiene por qué coincidir con una
+        // conversión mecánica del precio en dólares (suele llevar su propio
+        // recargo/actualización por cuotas).
+        final cuentaVinculada = await showModalBottomSheet<bool>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          builder: (_) => DeudaFormSheet(
+            tipoInicial: TipoDeuda.deudor,
+            conceptoInicial:
+                'Venta financiada - iPhone ${iphone.modelo} ${iphone.capacidad} '
+                '(IMEI ${iphone.imei})',
+            fechaInicial: resultado.fecha,
+            idEquipoVinculado: iphone.id,
+            tipoEquipoVinculado: 'iphone',
+          ),
+        );
+        // Si se cerró el formulario sin guardar (deslizando hacia abajo, o
+        // tocando afuera), el equipo queda vendido pero SIN cuenta
+        // vinculada: Reportes lo va a contar como venta de contado hasta
+        // que se vincule -avisamos acá para que no pase desapercibido-.
+        if (cuentaVinculada != true && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'El equipo quedó vendido sin cuenta vinculada. Podés vincularla '
+                'después desde Finanzas → editar la cuenta → "¿Corresponde a la '
+                'venta de un equipo?".',
+              ),
+              duration: Duration(seconds: 6),
+            ),
+          );
+        }
       }
     }
   }
@@ -591,12 +639,14 @@ class _VentaConfirmada {
   final DateTime fecha;
   final int mesesGarantia;
   final String? telefono;
+  final bool financiada;
 
   const _VentaConfirmada({
     required this.precioVenta,
     required this.fecha,
     required this.mesesGarantia,
     this.telefono,
+    required this.financiada,
   });
 }
 
@@ -613,13 +663,23 @@ class _MarcarVendidoDialogState extends State<_MarcarVendidoDialog> {
   late final _precioVentaCtrl = TextEditingController(
     text: widget.iphone.precioVenta?.toStringAsFixed(0) ?? '',
   );
+  final _precioVentaPesosCtrl = TextEditingController();
   final _telefonoCtrl = TextEditingController();
   DateTime _fecha = DateTime.now();
   late int _mesesGarantia = widget.iphone.mesesGarantia;
+  bool _financiada = false;
+
+  /// Si el precio se carga en pesos (en vez de USD directo), convertido
+  /// solo con la cotización del dólar blue del momento -ver
+  /// `CotizacionBlueField`-. `false` (USD directo) es el valor por
+  /// defecto, para no cambiar el comportamiento existente.
+  bool _precioEnPesos = false;
+  double? _tasaBlue;
 
   @override
   void dispose() {
     _precioVentaCtrl.dispose();
+    _precioVentaPesosCtrl.dispose();
     _telefonoCtrl.dispose();
     super.dispose();
   }
@@ -644,15 +704,31 @@ class _MarcarVendidoDialogState extends State<_MarcarVendidoDialog> {
     return null;
   }
 
+  String? _validarPrecioVentaPesos(String? value) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Ingresá el precio de venta en pesos';
+    }
+    final n = double.tryParse(value.trim().replaceAll(',', '.'));
+    if (n == null) return 'Debe ser un número válido';
+    if (n <= 0) return 'Debe ser mayor a 0';
+    return null;
+  }
+
   void _confirmar() {
     if (!_formKey.currentState!.validate()) return;
-    final precio = double.parse(_precioVentaCtrl.text.trim().replaceAll(',', '.'));
+    if (_precioEnPesos && (_tasaBlue == null || _tasaBlue! <= 0)) return;
+
+    final precio = _precioEnPesos
+        ? double.parse(_precioVentaPesosCtrl.text.trim().replaceAll(',', '.')) / _tasaBlue!
+        : double.parse(_precioVentaCtrl.text.trim().replaceAll(',', '.'));
+
     Navigator.of(context).pop(
       _VentaConfirmada(
         precioVenta: precio,
         fecha: _fecha,
         mesesGarantia: _mesesGarantia,
         telefono: _telefonoCtrl.text.trim(),
+        financiada: _financiada,
       ),
     );
   }
@@ -673,16 +749,56 @@ class _MarcarVendidoDialogState extends State<_MarcarVendidoDialog> {
             children: [
               Text('${iphone.modelo} · ${iphone.capacidad} · IMEI ${iphone.imei}'),
               const SizedBox(height: 16),
-              TextFormField(
-                controller: _precioVentaCtrl,
-                autofocus: true,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
-                  labelText: 'Precio de venta definitivo',
-                  prefixText: 'USD \$ ',
-                ),
-                validator: _validarPrecioVenta,
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('Cargar en USD')),
+                  ButtonSegment(value: true, label: Text('Cargar en pesos')),
+                ],
+                selected: {_precioEnPesos},
+                onSelectionChanged: (seleccion) =>
+                    setState(() => _precioEnPesos = seleccion.first),
               ),
+              const SizedBox(height: 12),
+              if (_precioEnPesos) ...[
+                TextFormField(
+                  controller: _precioVentaPesosCtrl,
+                  autofocus: true,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Precio de venta (en pesos)',
+                    prefixText: '\$ ',
+                  ),
+                  validator: _validarPrecioVentaPesos,
+                  // Solo para refrescar la equivalencia en USD de abajo a
+                  // medida que se tipea -no valida en cada tecla-.
+                  onChanged: (_) => setState(() {}),
+                ),
+                const SizedBox(height: 8),
+                CotizacionBlueField(onTasaResuelta: (tasa) => setState(() => _tasaBlue = tasa)),
+                if (_tasaBlue != null && _precioVentaPesosCtrl.text.trim().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Builder(builder: (context) {
+                      final pesos =
+                          double.tryParse(_precioVentaPesosCtrl.text.trim().replaceAll(',', '.'));
+                      if (pesos == null) return const SizedBox.shrink();
+                      return Text(
+                        'Equivale a USD \$${(pesos / _tasaBlue!).toStringAsFixed(0)}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      );
+                    }),
+                  ),
+              ] else
+                TextFormField(
+                  controller: _precioVentaCtrl,
+                  autofocus: true,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Precio de venta definitivo',
+                    prefixText: 'USD \$ ',
+                  ),
+                  validator: _validarPrecioVenta,
+                ),
               const SizedBox(height: 12),
               InkWell(
                 borderRadius: BorderRadius.circular(8),
@@ -713,6 +829,18 @@ class _MarcarVendidoDialogState extends State<_MarcarVendidoDialog> {
                 decoration: const InputDecoration(
                   labelText: 'Teléfono del comprador (opcional)',
                 ),
+              ),
+              const SizedBox(height: 4),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Venta financiada (en cuotas)'),
+                subtitle: const Text(
+                  'Se crea la cuenta en Finanzas (en pesos, la cargás en el '
+                  'siguiente paso) y el balance solo cuenta la ganancia a '
+                  'medida que se cobra cada cuota',
+                ),
+                value: _financiada,
+                onChanged: (value) => setState(() => _financiada = value),
               ),
             ],
           ),

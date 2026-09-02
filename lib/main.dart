@@ -8,17 +8,22 @@ import 'package:provider/provider.dart';
 // IMPORTANTE: generá este archivo con `flutterfire configure` antes de compilar.
 import 'firebase_options.dart';
 
+import 'config/app_config.dart';
+
 import 'models/android_model.dart';
 import 'models/cliente_model.dart';
 import 'models/deuda_model.dart';
 import 'models/gasto_model.dart';
+import 'models/ingreso_extra_model.dart';
 import 'models/iphone_model.dart';
 import 'models/pago_model.dart';
 import 'models/stock_empresa_model.dart';
+import 'models/venta_accesorio_model.dart';
 import 'screens/android_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/finanzas_screen.dart';
 import 'screens/gastos_screen.dart';
+import 'screens/ingresos_extra_screen.dart';
 import 'screens/iphones_screen.dart';
 import 'screens/reportes_screen.dart';
 import 'screens/stock_empresa_screen.dart';
@@ -117,6 +122,23 @@ class StockEmpresaProvider extends ChangeNotifier {
   Future<void> eliminar(String id) => _col.doc(id).delete();
 }
 
+/// Expone las ventas registradas de Stock de Empresa (colección
+/// `ventas_accesorios`). A diferencia de solo ajustar la cantidad en stock
+/// (`StockEmpresaProvider.actualizar`), esto es lo que le permite a
+/// reportes_screen.dart sumar cuánto se vendió de accesorios en cada
+/// período -ver el comentario en `VentaAccesorioModel`-.
+class VentaAccesorioProvider extends ChangeNotifier {
+  final _col = FirebaseFirestore.instance.collection('ventas_accesorios');
+
+  Stream<List<VentaAccesorioModel>> get stream => _col.snapshots().map(
+        (snap) => snap.docs.map((d) => VentaAccesorioModel.fromSnapshot(d)).toList(),
+      );
+
+  Future<void> agregar(VentaAccesorioModel venta) => _col.add(venta.toMap());
+
+  Future<void> eliminar(String id) => _col.doc(id).delete();
+}
+
 /// Expone los clientes (colección `clientes`), usados por deudores y
 /// acreedores. Los IDs pueden venir de la importación masiva desde Excel
 /// (`ID_Cliente`) o ser autogenerados por Firestore al crear un cliente
@@ -210,6 +232,11 @@ class DeudaProvider extends ChangeNotifier {
     double monto, {
     String nota = '',
     required String medioPago,
+    // Cotización del dólar blue al momento de cobrar, solo para cuentas de
+    // venta financiada (ver DeudaModel.esVentaFinanciada). La usa
+    // reportes_screen.dart para convertir este pago a USD con el valor del
+    // blue de ESE día, no el de hoy.
+    double? tasaBlue,
   }) async {
     final nuevoMontoAbonado = deuda.montoAbonado + monto;
     final deudaRef = _col.doc(deuda.id);
@@ -225,6 +252,7 @@ class DeudaProvider extends ChangeNotifier {
       'montoAbonado': monto,
       'fechaPago': Timestamp.now(),
       'nota': nota,
+      'tasaBlue': tasaBlue,
       'metodoPago': medioPago,
     });
     await batch.commit();
@@ -331,6 +359,23 @@ class GastoProvider extends ChangeNotifier {
   Future<void> eliminar(String id) => _col.doc(id).delete();
 }
 
+/// Expone los ingresos del negocio que no vienen de la venta de un equipo
+/// (reparaciones, arreglos, otros servicios) — colección `ingresos_extra`.
+class IngresoExtraProvider extends ChangeNotifier {
+  final _col = FirebaseFirestore.instance.collection('ingresos_extra');
+
+  Stream<List<IngresoExtraModel>> get stream => _col.snapshots().map(
+        (snap) => snap.docs.map((d) => IngresoExtraModel.fromSnapshot(d)).toList(),
+      );
+
+  Future<void> agregar(IngresoExtraModel ingreso) => _col.add(ingreso.toMap());
+
+  Future<void> actualizar(IngresoExtraModel ingreso) =>
+      _col.doc(ingreso.id).update(ingreso.toMap());
+
+  Future<void> eliminar(String id) => _col.doc(id).delete();
+}
+
 /// -----------------------------------------------------------------------
 /// APP ROOT
 /// -----------------------------------------------------------------------
@@ -347,13 +392,15 @@ class AppRoot extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => IPhoneStockProvider()),
         ChangeNotifierProvider(create: (_) => AndroidProvider()),
         ChangeNotifierProvider(create: (_) => StockEmpresaProvider()),
+        ChangeNotifierProvider(create: (_) => VentaAccesorioProvider()),
         ChangeNotifierProvider(create: (_) => ClienteProvider()),
         ChangeNotifierProvider(create: (_) => PagoProvider()),
         ChangeNotifierProvider(create: (_) => DeudaProvider()),
         ChangeNotifierProvider(create: (_) => GastoProvider()),
+        ChangeNotifierProvider(create: (_) => IngresoExtraProvider()),
       ],
       child: MaterialApp(
-        title: 'iPhone Stock Manager',
+        title: AppConfig.nombreApp,
         debugShowCheckedModeBanner: false,
         theme: _appTheme,
         home: const AuthGate(),
@@ -568,6 +615,7 @@ class HomeShell extends StatelessWidget {
     StockEmpresaScreen(),
     FinanzasScreen(),
     GastosScreen(),
+    IngresosExtraScreen(),
     ReportesScreen(),
   ];
 
@@ -588,6 +636,7 @@ const List<({IconData icon, String label, Color color})> _drawerItems = [
   (icon: Icons.inventory_2_rounded, label: 'Stock de Empresa', color: Color(0xFFFF9500)),
   (icon: Icons.request_quote_rounded, label: 'Finanzas', color: Color(0xFF2F5AA8)), // Violeta/azul de banco
   (icon: Icons.receipt_long_rounded, label: 'Gastos', color: Color(0xFFD2691E)), // Naranja terracota
+  (icon: Icons.handyman_rounded, label: 'Otros Ingresos', color: Color(0xFF34C759)), // Verde
   (icon: Icons.bar_chart_rounded, label: 'Balance & Reportes', color: Color(0xFF32ADE6)),
 ];
 
@@ -686,9 +735,9 @@ class _DrawerHeader extends StatelessWidget {
             child: const Icon(Icons.phone_iphone_rounded, color: Colors.white, size: 28),
           ),
           const SizedBox(height: 14),
-          const Text(
-            'iPhone Stock Manager',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
+          Text(
+            AppConfig.nombreApp,
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 18),
           ),
           const SizedBox(height: 4),
           Text(

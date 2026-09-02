@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -19,17 +18,20 @@ import '../models/deuda_model.dart';
 import '../models/gasto_model.dart';
 import '../models/iphone_model.dart';
 import '../models/stock_empresa_model.dart';
+import '../services/dolar_blue_service.dart';
 import 'android_screen.dart';
 import 'finanzas_screen.dart';
 import 'gastos_screen.dart';
+import 'ingresos_extra_screen.dart';
 import 'iphones_screen.dart';
 
 final _formatoUsd = NumberFormat.currency(locale: 'en_US', symbol: 'USD \$', decimalDigits: 0);
 final _formatoArs = NumberFormat.currency(locale: 'es_AR', symbol: 'AR\$', decimalDigits: 0);
 
-/// Documento en Firestore donde se guarda el tipo de cambio manual
-/// USD → moneda local, usado solo para mostrar equivalencias en el dashboard.
-final _tasaCambioRef = FirebaseFirestore.instance.collection('configuracion').doc('tasaCambio');
+/// Cotización de referencia usada solo si todavía no llegó ninguna
+/// respuesta del blue (por ejemplo, el instante en que se abre la app) o
+/// si la consulta a la API falla y el usuario no la carga a mano -evita
+/// que las tarjetas del dashboard queden en blanco mientras se resuelve-.
 const double _tasaCambioPorDefecto = 1000;
 
 /// Paleta de acento por categoría de negocio, reutilizada en toda la
@@ -39,7 +41,7 @@ const Color _colorAndroid = Color(0xFF12B886); // Verde menta / esmeralda
 const Color _colorGastos = Color(0xFFD2691E); // Naranja terracota
 const Color _colorFinanzas = Color(0xFF2F5AA8); // Violeta / azul de banco
 const Color _colorAccesorios = Color(0xFFFF9F0A); // Naranja cálido (accesorios)
-const Color _colorGanancia = Color(0xFF30B0C7); // Celeste/teal
+const Color _colorIngresoExtra = Color(0xFF34C759); // Verde (reparaciones/otros ingresos)
 const Color _colorUnidades = Color(0xFF00C7BE); // Teal
 
 /// Sombra suave y consistente para las tarjetas del dashboard.
@@ -55,8 +57,48 @@ List<BoxShadow> _sombraTarjeta(Color color) => [
 /// PANTALLA: DASHBOARD
 /// -----------------------------------------------------------------------
 
-class DashboardScreen extends StatelessWidget {
+class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
+
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
+  /// Cotización del dólar blue, única fuente para todo lo que muestra el
+  /// Dashboard (el chip de la AppBar y las equivalencias "≈ AR$..." de las
+  /// tarjetas) -reemplaza al tipo de cambio manual que antes se guardaba en
+  /// Firestore-. Se busca sola al entrar; mientras no resuelva, o si la
+  /// consulta falla, se usa [_tasaCambioPorDefecto] para no dejar las
+  /// tarjetas en blanco.
+  bool _buscandoBlue = true;
+  double? _tasaBlue;
+  bool _blueFallo = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _buscarBlue();
+  }
+
+  Future<void> _buscarBlue() async {
+    setState(() {
+      _buscandoBlue = true;
+      _blueFallo = false;
+    });
+    // Límite duro además del timeout propio del servicio, para que el chip
+    // nunca quede pegado buscando pase lo que pase con la conexión.
+    final cotizacion = await Future.any([
+      DolarBlueService().obtenerCotizacion(),
+      Future.delayed(const Duration(seconds: 10), () => null),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _buscandoBlue = false;
+      _tasaBlue = cotizacion?.venta;
+      _blueFallo = cotizacion == null;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -65,10 +107,26 @@ class DashboardScreen extends StatelessWidget {
     final stockEmpresaProvider = context.watch<StockEmpresaProvider>();
     final deudaProvider = context.watch<DeudaProvider>();
     final gastoProvider = context.watch<GastoProvider>();
+    final tasaCambio = _tasaBlue ?? _tasaCambioPorDefecto;
 
     return Scaffold(
       drawer: const AppDrawer(),
-      appBar: AppBar(title: const Text('Dashboard')),
+      appBar: AppBar(
+        title: const Text('Dashboard'),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Center(
+              child: _DolarBlueChip(
+                buscando: _buscandoBlue,
+                venta: _tasaBlue,
+                fallo: _blueFallo,
+                onTap: _buscandoBlue ? null : _buscarBlue,
+              ),
+            ),
+          ),
+        ],
+      ),
       body: StreamBuilder<List<IPhoneModel>>(
         stream: iphoneProvider.stream,
         builder: (context, snapIphones) {
@@ -84,40 +142,31 @@ class DashboardScreen extends StatelessWidget {
                       return StreamBuilder<List<GastoModel>>(
                         stream: gastoProvider.stream,
                         builder: (context, snapGastos) {
-                          return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                            stream: _tasaCambioRef.snapshots(),
-                            builder: (context, snapTasa) {
-                              final cargando = !snapIphones.hasData ||
-                                  !snapAndroids.hasData ||
-                                  !snapAccesorios.hasData ||
-                                  !snapDeudas.hasData ||
-                                  !snapGastos.hasData;
-                              if (cargando) {
-                                return const Center(child: CircularProgressIndicator());
-                              }
+                          final cargando = !snapIphones.hasData ||
+                              !snapAndroids.hasData ||
+                              !snapAccesorios.hasData ||
+                              !snapDeudas.hasData ||
+                              !snapGastos.hasData;
+                          if (cargando) {
+                            return const Center(child: CircularProgressIndicator());
+                          }
 
-                              final error = snapIphones.error ??
-                                  snapAndroids.error ??
-                                  snapAccesorios.error ??
-                                  snapDeudas.error ??
-                                  snapGastos.error;
-                              if (error != null) {
-                                return Center(child: Text('Error al cargar el dashboard: $error'));
-                              }
+                          final error = snapIphones.error ??
+                              snapAndroids.error ??
+                              snapAccesorios.error ??
+                              snapDeudas.error ??
+                              snapGastos.error;
+                          if (error != null) {
+                            return Center(child: Text('Error al cargar el dashboard: $error'));
+                          }
 
-                              final tasaCambio =
-                                  (snapTasa.data?.data()?['valor'] as num?)?.toDouble() ??
-                                      _tasaCambioPorDefecto;
-
-                              return _DashboardBody(
-                                iphones: snapIphones.data!,
-                                androids: snapAndroids.data!,
-                                accesorios: snapAccesorios.data!,
-                                deudas: snapDeudas.data!,
-                                gastos: snapGastos.data!,
-                                tasaCambio: tasaCambio,
-                              );
-                            },
+                          return _DashboardBody(
+                            iphones: snapIphones.data!,
+                            androids: snapAndroids.data!,
+                            accesorios: snapAccesorios.data!,
+                            deudas: snapDeudas.data!,
+                            gastos: snapGastos.data!,
+                            tasaCambio: tasaCambio,
                           );
                         },
                       );
@@ -128,6 +177,84 @@ class DashboardScreen extends StatelessWidget {
             },
           );
         },
+      ),
+    );
+  }
+}
+
+/// -----------------------------------------------------------------------
+/// CHIP: COTIZACIÓN DEL DÓLAR BLUE
+/// -----------------------------------------------------------------------
+
+/// Chip chico y siempre visible (va en la AppBar del Dashboard) con la
+/// cotización de venta del dólar blue del momento, consultada a
+/// dolarapi.com. Muestra el estado que le pasa [_DashboardScreenState] (es
+/// la misma cotización que usan las tarjetas de abajo para las
+/// equivalencias en pesos) y se puede tocar para refrescar.
+class _DolarBlueChip extends StatelessWidget {
+  final bool buscando;
+  final double? venta;
+  final bool fallo;
+  final VoidCallback? onTap;
+
+  const _DolarBlueChip({
+    required this.buscando,
+    required this.venta,
+    required this.fallo,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Verde, el mismo acento que usan "Ingresos"/"Otros ingresos" en el
+    // resto de la app -con fondo suave, para que se lea bien tanto en el
+    // AppBar claro de esta app como en modo oscuro del sistema-.
+    const color = _colorIngresoExtra;
+
+    String texto;
+    IconData icono;
+    if (buscando) {
+      texto = 'Blue...';
+      icono = Icons.hourglass_top_rounded;
+    } else if (fallo || venta == null) {
+      texto = 'Blue: --';
+      icono = Icons.error_outline_rounded;
+    } else {
+      texto = 'Blue \$${venta!.toStringAsFixed(0)}';
+      icono = Icons.attach_money_rounded;
+    }
+
+    return Material(
+      color: color.withValues(alpha: 0.14),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (buscando)
+                const SizedBox(
+                  height: 12,
+                  width: 12,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: color),
+                )
+              else
+                Icon(icono, size: 14, color: color),
+              const SizedBox(width: 6),
+              Text(
+                texto,
+                style: const TextStyle(
+                  color: color,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -163,10 +290,6 @@ class _DashboardBody extends StatelessWidget {
         androidsDisponibles.fold<double>(0, (s, e) => s + e.costo);
 
     final unidadesDisponibles = iphonesDisponibles.length + androidsDisponibles.length;
-
-    final gananciaEstimadaUsd =
-        iphonesDisponibles.fold<double>(0, (s, e) => s + (e.gananciaPropia ?? 0)) +
-            androidsDisponibles.fold<double>(0, (s, e) => s + (e.gananciaPropia ?? 0));
 
     final totalPorCobrarArs = deudas
         .where((d) => d.tipo == TipoDeuda.deudor)
@@ -270,10 +393,23 @@ class _DashboardBody extends StatelessWidget {
                     builder: (_) => const GastoFormSheet(),
                   ),
                 ),
+                _AccionRapidaCard(
+                  icon: Icons.handyman_rounded,
+                  color: _colorIngresoExtra,
+                  label: 'Agregar Ingreso',
+                  // Reparaciones, arreglos u otros ingresos que no vienen de
+                  // la venta de un equipo (ver ingresos_extra_screen.dart).
+                  onTap: () => showModalBottomSheet(
+                    context: context,
+                    isScrollControlled: true,
+                    useSafeArea: true,
+                    builder: (_) => const IngresoExtraFormSheet(),
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 20),
-            _TasaCambioBar(tasaCambio: tasaCambio),
+            _TasaCambioInfo(tasaCambio: tasaCambio),
             const SizedBox(height: 24),
             _SeccionTitulo('Resumen financiero'),
             const SizedBox(height: 4),
@@ -321,14 +457,6 @@ class _DashboardBody extends StatelessWidget {
                   valorPrincipal: _formatoArs.format(totalPorCobrarArs),
                   valorSecundario: '≈ '
                       '${_formatoUsd.format(tasaCambio == 0 ? 0 : totalPorCobrarArs / tasaCambio)}',
-                ),
-                _MetricCard(
-                  icon: Icons.trending_up,
-                  color: _colorGanancia,
-                  titulo: 'Ganancia estimada',
-                  subtitulo: 'Stock disponible',
-                  valorPrincipal: _formatoUsd.format(gananciaEstimadaUsd),
-                  valorSecundario: '≈ ${_formatoArs.format(gananciaEstimadaUsd * tasaCambio)}',
                 ),
                 _MetricCard(
                   icon: Icons.trending_down,
@@ -427,77 +555,36 @@ class _Saludo extends StatelessWidget {
 }
 
 /// -----------------------------------------------------------------------
-/// BARRA DE TIPO DE CAMBIO (editable, persistida en Firestore)
+/// BARRA DE TIPO DE CAMBIO (informativa: dólar blue en vivo)
 /// -----------------------------------------------------------------------
 
-class _TasaCambioBar extends StatelessWidget {
+/// Solo informativa -no editable-: el tipo de cambio usado para las
+/// equivalencias en pesos de este Dashboard es siempre el dólar blue en
+/// vivo (chip de la AppBar), no un valor cargado a mano.
+class _TasaCambioInfo extends StatelessWidget {
   final double tasaCambio;
-  const _TasaCambioBar({required this.tasaCambio});
-
-  Future<void> _editar(BuildContext context) async {
-    final ctrl = TextEditingController(text: tasaCambio.toStringAsFixed(0));
-    final nuevoValor = await showDialog<double>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Tipo de cambio'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(
-            labelText: 'USD 1 =',
-            prefixText: 'AR\$ ',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancelar'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final n = double.tryParse(ctrl.text.trim().replaceAll(',', '.'));
-              if (n != null && n > 0) Navigator.of(context).pop(n);
-            },
-            child: const Text('Guardar'),
-          ),
-        ],
-      ),
-    );
-
-    if (nuevoValor != null) {
-      await _tasaCambioRef.set(
-        {'valor': nuevoValor, 'actualizadoEn': Timestamp.now()},
-        SetOptions(merge: true),
-      );
-    }
-  }
+  const _TasaCambioInfo({required this.tasaCambio});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: () => _editar(context),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.currency_exchange, size: 16),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Tipo de cambio: USD 1 = ${_formatoArs.format(tasaCambio)}',
-                style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500),
-              ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.currency_exchange, size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Tipo de cambio (dólar blue): USD 1 = ${_formatoArs.format(tasaCambio)}',
+              style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500),
             ),
-            Icon(Icons.edit_outlined, size: 16, color: theme.colorScheme.primary),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -714,7 +801,6 @@ class _MetricCard extends StatelessWidget {
   final IconData icon;
   final Color color;
   final String titulo;
-  final String? subtitulo;
   final String valorPrincipal;
   final String valorSecundario;
 
@@ -722,7 +808,6 @@ class _MetricCard extends StatelessWidget {
     required this.icon,
     required this.color,
     required this.titulo,
-    this.subtitulo,
     required this.valorPrincipal,
     required this.valorSecundario,
   });
@@ -759,14 +844,6 @@ class _MetricCard extends StatelessWidget {
             titulo,
             style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600),
           ),
-          if (subtitulo != null)
-            Text(
-              subtitulo!,
-              style: GoogleFonts.inter(
-                fontSize: 10,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
           const SizedBox(height: 6),
           FittedBox(
             fit: BoxFit.scaleDown,

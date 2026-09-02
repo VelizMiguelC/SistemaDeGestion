@@ -50,6 +50,19 @@ class DeudaModel {
   final String numeroDeuda;
   final String nota;
 
+  /// Si esta cuenta se generó al marcar un equipo como vendido "financiado
+  /// (en cuotas)" (ver `_MarcarVendidoDialog` en iphones_screen.dart /
+  /// android_screen.dart), acá queda el id de ese equipo y su tipo
+  /// ('iphone' o 'android'). `null` en el resto de las cuentas (alta manual
+  /// desde Finanzas, o importadas desde Excel).
+  ///
+  /// Esta vinculación es la que le permite a `reportes_screen.dart`
+  /// reconocer el ingreso/ganancia de una venta financiada a medida que se
+  /// cobra cada cuota (en `pagos`), en vez de contar el precio de venta
+  /// completo el día de la venta.
+  final String? idEquipoVinculado;
+  final String? tipoEquipoVinculado;
+
   /// Historial de pagos/abonos de esta cuenta, en memoria.
   ///
   /// La fuente de verdad sigue siendo la colección de nivel superior
@@ -80,10 +93,16 @@ class DeudaModel {
     this.numeroDeuda = '',
     this.nota = '',
     this.pagos,
+    this.idEquipoVinculado,
+    this.tipoEquipoVinculado,
   });
 
   double get saldoPendiente => montoTotal - montoAbonado;
   bool get estaSaldada => saldoPendiente <= 0;
+
+  /// `true` si esta cuenta corresponde a la venta financiada de un equipo
+  /// (en vez de una deuda/cuenta cargada manualmente).
+  bool get esVentaFinanciada => idEquipoVinculado != null;
 
   /// Alias de [fechaEmision], para coincidir con el nombre pedido en el
   /// esquema binario pendiente/pagado ("fechaCreacion").
@@ -123,6 +142,8 @@ class DeudaModel {
       // ("YYYY-MM-DD"): `_leerPagosEmbebidos` maneja ambos casos sin
       // lanzar excepciones.
       pagos: _leerPagosEmbebidos(map['pagos'], documentId),
+      idEquipoVinculado: map['idEquipoVinculado'] as String?,
+      tipoEquipoVinculado: map['tipoEquipoVinculado'] as String?,
     );
   }
 
@@ -143,6 +164,8 @@ class DeudaModel {
       'fechaPago': fechaPago != null ? Timestamp.fromDate(fechaPago!) : null,
       'numeroDeuda': numeroDeuda,
       'nota': nota,
+      'idEquipoVinculado': idEquipoVinculado,
+      'tipoEquipoVinculado': tipoEquipoVinculado,
     };
   }
 
@@ -160,6 +183,8 @@ class DeudaModel {
     String? numeroDeuda,
     String? nota,
     List<PagoModel>? pagos,
+    String? idEquipoVinculado,
+    String? tipoEquipoVinculado,
   }) {
     return DeudaModel(
       id: id ?? this.id,
@@ -174,6 +199,8 @@ class DeudaModel {
       numeroDeuda: numeroDeuda ?? this.numeroDeuda,
       nota: nota ?? this.nota,
       pagos: pagos ?? this.pagos,
+      idEquipoVinculado: idEquipoVinculado ?? this.idEquipoVinculado,
+      tipoEquipoVinculado: tipoEquipoVinculado ?? this.tipoEquipoVinculado,
     );
   }
 }

@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
-import '../main.dart' show StockEmpresaProvider, AppDrawer;
+import '../main.dart' show StockEmpresaProvider, VentaAccesorioProvider, AppDrawer;
 import '../models/stock_empresa_model.dart';
+import '../models/venta_accesorio_model.dart';
+
+final _formatoFecha = DateFormat('dd/MM/yyyy');
 
 /// Categorías fijas para clasificar accesorios, repuestos e insumos.
 const List<String> kCategoriasStockEmpresa = [
@@ -61,6 +65,38 @@ class _StockEmpresaScreenState extends State<StockEmpresaScreen>
     await provider.actualizar(item.copyWith(cantidad: nuevaCantidad));
   }
 
+  /// A diferencia de los botones +/- (ajustes de stock: reponer, corregir,
+  /// dar de baja por rotura), esto además queda registrado con fecha en
+  /// `ventas_accesorios` -es lo que le permite a Balance & Reportes sumar
+  /// cuánto se vendió de accesorios en cada período-.
+  Future<void> _venderProducto(StockEmpresaModel item) async {
+    if (item.cantidad <= 0) return;
+    final resultado = await showDialog<_VentaConfirmada>(
+      context: context,
+      builder: (context) => _VenderDialog(item: item),
+    );
+    if (resultado == null) return;
+
+    await context
+        .read<StockEmpresaProvider>()
+        .actualizar(item.copyWith(cantidad: item.cantidad - resultado.cantidad));
+    await context.read<VentaAccesorioProvider>().agregar(VentaAccesorioModel(
+          id: '',
+          itemId: item.id,
+          nombre: item.nombre,
+          cantidad: resultado.cantidad,
+          costoUnitario: item.costoUnitario,
+          precioVenta: item.precioVenta,
+          fecha: resultado.fecha,
+        ));
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Venta registrada: ${resultado.cantidad} × ${item.nombre}')),
+      );
+    }
+  }
+
   void _abrirFormularioNuevoProducto() {
     showModalBottomSheet(
       context: context,
@@ -109,6 +145,7 @@ class _StockEmpresaScreenState extends State<StockEmpresaScreen>
                 item: e,
                 onIncrementar: () => _ajustarCantidad(e, 1),
                 onDecrementar: () => _ajustarCantidad(e, -1),
+                onVender: () => _venderProducto(e),
               );
             },
           );
@@ -131,11 +168,13 @@ class _StockEmpresaCard extends StatelessWidget {
   final StockEmpresaModel item;
   final VoidCallback onIncrementar;
   final VoidCallback onDecrementar;
+  final VoidCallback onVender;
 
   const _StockEmpresaCard({
     required this.item,
     required this.onIncrementar,
     required this.onDecrementar,
+    required this.onVender,
   });
 
   @override
@@ -216,6 +255,15 @@ class _StockEmpresaCard extends StatelessWidget {
                   ],
                 ),
               ],
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.tonalIcon(
+                onPressed: item.cantidad > 0 ? onVender : null,
+                icon: const Icon(Icons.point_of_sale_outlined, size: 18),
+                label: const Text('Vender'),
+              ),
             ),
           ],
         ),
@@ -489,6 +537,112 @@ class _StockEmpresaFormSheetState extends State<_StockEmpresaFormSheet> {
           );
         },
       ),
+    );
+  }
+}
+
+/// -----------------------------------------------------------------------
+/// DIÁLOGO: VENDER
+/// -----------------------------------------------------------------------
+
+class _VentaConfirmada {
+  final int cantidad;
+  final DateTime fecha;
+  const _VentaConfirmada({required this.cantidad, required this.fecha});
+}
+
+class _VenderDialog extends StatefulWidget {
+  final StockEmpresaModel item;
+  const _VenderDialog({required this.item});
+
+  @override
+  State<_VenderDialog> createState() => _VenderDialogState();
+}
+
+class _VenderDialogState extends State<_VenderDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final _cantidadCtrl = TextEditingController(text: '1');
+  DateTime _fecha = DateTime.now();
+
+  @override
+  void dispose() {
+    _cantidadCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _elegirFecha() async {
+    final elegida = await showDatePicker(
+      context: context,
+      initialDate: _fecha,
+      firstDate: DateTime(2000),
+      lastDate: DateTime.now().add(const Duration(days: 1)),
+    );
+    if (elegida != null) setState(() => _fecha = elegida);
+  }
+
+  String? _validarCantidad(String? value) {
+    if (value == null || value.trim().isEmpty) return 'Ingresá la cantidad';
+    final n = int.tryParse(value.trim());
+    if (n == null) return 'Debe ser un número entero';
+    if (n <= 0) return 'Debe ser mayor a 0';
+    if (n > widget.item.cantidad) {
+      return 'No hay stock suficiente (quedan ${widget.item.cantidad})';
+    }
+    return null;
+  }
+
+  void _confirmar() {
+    if (!_formKey.currentState!.validate()) return;
+    final cantidad = int.parse(_cantidadCtrl.text.trim());
+    Navigator.of(context).pop(_VentaConfirmada(cantidad: cantidad, fecha: _fecha));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final item = widget.item;
+
+    return AlertDialog(
+      title: const Text('Vender'),
+      content: Form(
+        key: _formKey,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('${item.nombre} · quedan ${item.cantidad} en stock'),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _cantidadCtrl,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Cantidad vendida'),
+              validator: _validarCantidad,
+            ),
+            const SizedBox(height: 12),
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: _elegirFecha,
+              child: InputDecorator(
+                decoration: const InputDecoration(
+                  labelText: 'Fecha de venta',
+                  suffixIcon: Icon(Icons.calendar_today, size: 18),
+                ),
+                child: Text(_formatoFecha.format(_fecha)),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancelar'),
+        ),
+        FilledButton(
+          onPressed: _confirmar,
+          child: const Text('Confirmar'),
+        ),
+      ],
     );
   }
 }

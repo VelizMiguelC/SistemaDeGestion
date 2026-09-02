@@ -4,6 +4,9 @@ import 'package:provider/provider.dart';
 
 import '../main.dart' show AndroidProvider, AppDrawer;
 import '../models/android_model.dart';
+import '../models/deuda_model.dart' show TipoDeuda;
+import '../widgets/cotizacion_blue_field.dart';
+import 'finanzas_screen.dart' show DeudaFormSheet;
 
 final _formatoUsd = NumberFormat.currency(locale: 'en_US', symbol: 'USD \$', decimalDigits: 0);
 final _formatoFecha = DateFormat('dd/MM/yyyy');
@@ -141,6 +144,40 @@ class _AndroidScreenState extends State<AndroidScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Equipo marcado como vendido')),
         );
+      }
+
+      // Venta financiada (en cuotas): mismo flujo que en iphones_screen.dart
+      // -ver el comentario allá para el detalle de por qué se vincula la
+      // cuenta al equipo en vez de reconocer todo el ingreso de una vez.
+      if (resultado.financiada && mounted) {
+        // El monto NO se prellena: ver el comentario en iphones_screen.dart
+        // -el precio de venta del equipo está en USD, pero las cuentas de
+        // Finanzas siempre están en pesos-.
+        final cuentaVinculada = await showModalBottomSheet<bool>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          builder: (_) => DeudaFormSheet(
+            tipoInicial: TipoDeuda.deudor,
+            conceptoInicial:
+                'Venta financiada - ${equipo.marca} ${equipo.modelo} ${equipo.almacenamiento}',
+            fechaInicial: resultado.fecha,
+            idEquipoVinculado: equipo.id,
+            tipoEquipoVinculado: 'android',
+          ),
+        );
+        if (cuentaVinculada != true && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'El equipo quedó vendido sin cuenta vinculada. Podés vincularla '
+                'después desde Finanzas → editar la cuenta → "¿Corresponde a la '
+                'venta de un equipo?".',
+              ),
+              duration: Duration(seconds: 6),
+            ),
+          );
+        }
       }
     }
   }
@@ -629,12 +666,14 @@ class _VentaConfirmadaAndroid {
   final DateTime fecha;
   final int mesesGarantia;
   final String? telefono;
+  final bool financiada;
 
   const _VentaConfirmadaAndroid({
     required this.precioVenta,
     required this.fecha,
     required this.mesesGarantia,
     this.telefono,
+    required this.financiada,
   });
 }
 
@@ -651,13 +690,21 @@ class _MarcarVendidoDialogAndroidState extends State<_MarcarVendidoDialogAndroid
   late final _precioVentaCtrl = TextEditingController(
     text: widget.equipo.precioVenta?.toStringAsFixed(0) ?? '',
   );
+  final _precioVentaPesosCtrl = TextEditingController();
   final _telefonoCtrl = TextEditingController();
   DateTime _fecha = DateTime.now();
   late int _mesesGarantia = widget.equipo.mesesGarantia;
+  bool _financiada = false;
+
+  /// Ver el comentario en iphones_screen.dart -mismo mecanismo de carga en
+  /// pesos convertida sola a USD con el dólar blue-.
+  bool _precioEnPesos = false;
+  double? _tasaBlue;
 
   @override
   void dispose() {
     _precioVentaCtrl.dispose();
+    _precioVentaPesosCtrl.dispose();
     _telefonoCtrl.dispose();
     super.dispose();
   }
@@ -682,15 +729,31 @@ class _MarcarVendidoDialogAndroidState extends State<_MarcarVendidoDialogAndroid
     return null;
   }
 
+  String? _validarPrecioVentaPesos(String? value) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Ingresá el precio de venta en pesos';
+    }
+    final n = double.tryParse(value.trim().replaceAll(',', '.'));
+    if (n == null) return 'Debe ser un número válido';
+    if (n <= 0) return 'Debe ser mayor a 0';
+    return null;
+  }
+
   void _confirmar() {
     if (!_formKey.currentState!.validate()) return;
-    final precio = double.parse(_precioVentaCtrl.text.trim().replaceAll(',', '.'));
+    if (_precioEnPesos && (_tasaBlue == null || _tasaBlue! <= 0)) return;
+
+    final precio = _precioEnPesos
+        ? double.parse(_precioVentaPesosCtrl.text.trim().replaceAll(',', '.')) / _tasaBlue!
+        : double.parse(_precioVentaCtrl.text.trim().replaceAll(',', '.'));
+
     Navigator.of(context).pop(
       _VentaConfirmadaAndroid(
         precioVenta: precio,
         fecha: _fecha,
         mesesGarantia: _mesesGarantia,
         telefono: _telefonoCtrl.text.trim(),
+        financiada: _financiada,
       ),
     );
   }
@@ -711,16 +774,54 @@ class _MarcarVendidoDialogAndroidState extends State<_MarcarVendidoDialogAndroid
             children: [
               Text('${equipo.marca} ${equipo.modelo} · ${equipo.almacenamiento}'),
               const SizedBox(height: 16),
-              TextFormField(
-                controller: _precioVentaCtrl,
-                autofocus: true,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
-                  labelText: 'Precio de venta definitivo',
-                  prefixText: 'USD \$ ',
-                ),
-                validator: _validarPrecioVenta,
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('Cargar en USD')),
+                  ButtonSegment(value: true, label: Text('Cargar en pesos')),
+                ],
+                selected: {_precioEnPesos},
+                onSelectionChanged: (seleccion) =>
+                    setState(() => _precioEnPesos = seleccion.first),
               ),
+              const SizedBox(height: 12),
+              if (_precioEnPesos) ...[
+                TextFormField(
+                  controller: _precioVentaPesosCtrl,
+                  autofocus: true,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Precio de venta (en pesos)',
+                    prefixText: '\$ ',
+                  ),
+                  validator: _validarPrecioVentaPesos,
+                  onChanged: (_) => setState(() {}),
+                ),
+                const SizedBox(height: 8),
+                CotizacionBlueField(onTasaResuelta: (tasa) => setState(() => _tasaBlue = tasa)),
+                if (_tasaBlue != null && _precioVentaPesosCtrl.text.trim().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Builder(builder: (context) {
+                      final pesos =
+                          double.tryParse(_precioVentaPesosCtrl.text.trim().replaceAll(',', '.'));
+                      if (pesos == null) return const SizedBox.shrink();
+                      return Text(
+                        'Equivale a USD \$${(pesos / _tasaBlue!).toStringAsFixed(0)}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      );
+                    }),
+                  ),
+              ] else
+                TextFormField(
+                  controller: _precioVentaCtrl,
+                  autofocus: true,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Precio de venta definitivo',
+                    prefixText: 'USD \$ ',
+                  ),
+                  validator: _validarPrecioVenta,
+                ),
               const SizedBox(height: 12),
               InkWell(
                 borderRadius: BorderRadius.circular(8),
@@ -751,6 +852,18 @@ class _MarcarVendidoDialogAndroidState extends State<_MarcarVendidoDialogAndroid
                 decoration: const InputDecoration(
                   labelText: 'Teléfono del comprador (opcional)',
                 ),
+              ),
+              const SizedBox(height: 4),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Venta financiada (en cuotas)'),
+                subtitle: const Text(
+                  'Se crea la cuenta en Finanzas (en pesos, la cargás en el '
+                  'siguiente paso) y el balance solo cuenta la ganancia a '
+                  'medida que se cobra cada cuota',
+                ),
+                value: _financiada,
+                onChanged: (value) => setState(() => _financiada = value),
               ),
             ],
           ),

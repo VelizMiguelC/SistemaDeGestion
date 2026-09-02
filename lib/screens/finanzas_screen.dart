@@ -5,11 +5,21 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../main.dart' show DeudaProvider, ClienteProvider, PagoProvider, AppDrawer;
+import '../main.dart'
+    show
+        AndroidProvider,
+        AppDrawer,
+        ClienteProvider,
+        DeudaProvider,
+        IPhoneStockProvider,
+        PagoProvider;
+import '../models/android_model.dart';
 import '../models/cliente_model.dart';
 import '../models/deuda_model.dart';
+import '../models/iphone_model.dart';
 import '../models/pago_model.dart';
 import '../services/deuda_import_service.dart';
+import '../widgets/cotizacion_blue_field.dart';
 
 final _formatoMoneda = NumberFormat.currency(locale: 'es_AR', symbol: '\$', decimalDigits: 0);
 final _formatoFecha = DateFormat('dd/MM/yyyy');
@@ -218,7 +228,7 @@ class _FinanzasScreenState extends State<FinanzasScreen> with TickerProviderStat
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (context) => _DeudaFormSheet(tipoInicial: _tipoActual),
+      builder: (context) => DeudaFormSheet(tipoInicial: _tipoActual),
     );
   }
 
@@ -227,7 +237,7 @@ class _FinanzasScreenState extends State<FinanzasScreen> with TickerProviderStat
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (context) => _DeudaFormSheet(tipoInicial: deuda.tipo, deuda: deuda),
+      builder: (context) => DeudaFormSheet(tipoInicial: deuda.tipo, deuda: deuda),
     );
   }
 
@@ -710,13 +720,21 @@ class _DeudaCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(18),
         side: BorderSide(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6)),
       ),
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(width: 5, color: color),
-            Expanded(
-              child: ExpansionTile(
+      // Antes esto era un IntrinsicHeight+Row con una franja de color como
+      // hermana del ExpansionTile, para que estirara hasta su altura. Se
+      // sacó porque IntrinsicHeight mide la altura una sola vez por pase de
+      // layout: cuando el contenido de adentro crece después de esa medición
+      // -como el historial de pagos, que llega asíncrono desde Firestore y
+      // recién ahí sabe cuánto mide-, la franja (y la tarjeta entera) se
+      // quedaba con la altura vieja y la tarjeta siguiente del ListView
+      // terminaba superpuesta encima. Un borde izquierdo no tiene ese
+      // problema: siempre se dibuja del alto real del contenido, se
+      // recalcule cuando se recalcule.
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border(left: BorderSide(color: color, width: 5)),
+        ),
+        child: ExpansionTile(
                 tilePadding: const EdgeInsets.fromLTRB(10, 4, 8, 4),
                 childrenPadding: EdgeInsets.zero,
                 leading: CircleAvatar(
@@ -905,9 +923,6 @@ class _DeudaCard extends StatelessWidget {
                   ),
                 ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -975,11 +990,38 @@ class _HistorialPagos extends StatefulWidget {
 class _HistorialPagosState extends State<_HistorialPagos> {
   DeudaModel get deuda => widget.deuda;
 
-  // Se incrementa cada vez que se toca "Reintentar": al cambiar, `build()`
-  // vuelve a llamar a `provider.porDeuda(...)`, que crea una suscripción
-  // nueva (StreamBuilder resuscribe solo apenas detecta que el Stream que
-  // recibe es una instancia distinta a la anterior).
+  // El Stream se crea UNA sola vez acá (no en cada build()): antes se
+  // llamaba a `provider.porDeuda(...)` directo dentro de build(), y como
+  // esta tarjeta se reconstruye cada vez que CUALQUIER cuenta de la lista
+  // cambia (todas escuchan la misma colección `deudas`), Firestore
+  // devuelve una instancia de Stream distinta en cada reconstrucción.
+  // StreamBuilder ve un Stream "nuevo" y se resuscribe desde cero -tirando
+  // la suscripción anterior- así haya cambiado o no la cuenta de ESTA
+  // tarjeta en particular. Si esa resuscripción justo se dispara en el
+  // instante en que se termina de guardar un pago nuevo, puede alcanzar a
+  // agarrar la foto de un pago atrás y quedarse ahí, porque no vuelve a
+  // haber ningún otro evento que la actualice. Además, resuscribirse todo
+  // el tiempo sin necesidad es varias consultas de más a Firestore en
+  // paralelo, lo que contribuye a que la pantalla se sienta más lenta.
+  late Stream<List<PagoModel>> _stream = context.read<PagoProvider>().porDeuda(deuda.id);
+
+  // Se incrementa cada vez que se toca "Reintentar", solo para forzar que
+  // StreamBuilder reciba una key distinta (ver más abajo _stream también
+  // se recrea ahí a propósito, a diferencia del resto de los rebuilds).
   int _intentos = 0;
+
+  @override
+  void didUpdateWidget(covariant _HistorialPagos oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Solo se recrea el Stream si de verdad cambió la cuenta que muestra
+    // esta tarjeta (no debería pasar en el uso normal, pero cubre el caso
+    // de que el mismo elemento se reutilice para otra cuenta).
+    if (oldWidget.deuda.id != widget.deuda.id) {
+      _stream = context.read<PagoProvider>().porDeuda(deuda.id);
+      _ultimosPagos = null;
+      _programarTimeoutPrimeraCarga();
+    }
+  }
 
   // Último snapshot de pagos recibido con éxito. Se sigue mostrando aunque
   // después llegue un evento de error puntual del stream (reconexión,
@@ -992,9 +1034,14 @@ class _HistorialPagosState extends State<_HistorialPagos> {
   // se muestra un error en vez de dejar el spinner girando para siempre.
   // A propósito NO es un timeout que se reinicia con cada evento del
   // stream: un listener de Firestore sano puede quedarse en silencio
-  // mucho más de 15s sin que pase nada raro (simplemente no hay pagos
+  // mucho más de 30s sin que pase nada raro (simplemente no hay pagos
   // nuevos), y tratar ese silencio como un error fue justamente el bug
   // que causaba que la pantalla se rompiera sola a los pocos segundos.
+  //
+  // 30s (antes 15s) porque en datos móviles la primera conexión al
+  // listener de Firestore puede tardar bastante más que en una PC con
+  // wifi -con 15s el historial directamente no llegaba a aparecer en el
+  // celular antes de mostrar el error-.
   Timer? _timeoutPrimeraCarga;
   bool _huboAlgunEvento = false;
   Object? _errorPrimeraCarga;
@@ -1009,7 +1056,7 @@ class _HistorialPagosState extends State<_HistorialPagos> {
     _timeoutPrimeraCarga?.cancel();
     _huboAlgunEvento = false;
     _errorPrimeraCarga = null;
-    _timeoutPrimeraCarga = Timer(const Duration(seconds: 15), () {
+    _timeoutPrimeraCarga = Timer(const Duration(seconds: 30), () {
       if (!_huboAlgunEvento && mounted) {
         setState(() {
           _errorPrimeraCarga = TimeoutException(
@@ -1114,8 +1161,6 @@ class _HistorialPagosState extends State<_HistorialPagos> {
 
   @override
   Widget build(BuildContext context) {
-    final provider = context.read<PagoProvider>();
-
     // Ojo: esta consulta es solo `where('idDeuda', ...)`, sin `orderBy` del
     // lado de Firestore a propósito. Combinar un filtro con un orderBy en
     // otro campo requiere crear un índice compuesto en Firestore; si ese
@@ -1123,9 +1168,15 @@ class _HistorialPagosState extends State<_HistorialPagos> {
     // -que antes no se mostraba en ningún lado, dejando el spinner girando
     // para siempre-. El orden (más recientes primero) se aplica acá en el
     // cliente, sobre la lista ya cargada.
+    //
+    // El Stream en sí (`_stream`) NO se crea acá -ver el comentario en el
+    // campo-, así este build() se puede llamar todas las veces que haga
+    // falta (por ejemplo, cuando cambia OTRA cuenta de la lista) sin que
+    // eso tire la suscripción a Firestore de esta tarjeta y la vuelva a
+    // levantar de cero cada vez.
     return StreamBuilder<List<PagoModel>>(
       key: ValueKey(_intentos),
-      stream: provider.porDeuda(deuda.id),
+      stream: _stream,
       builder: (context, snapshot) {
         if (snapshot.hasData || snapshot.hasError) {
           _huboAlgunEvento = true;
@@ -1162,6 +1213,11 @@ class _HistorialPagosState extends State<_HistorialPagos> {
                 TextButton(
                   onPressed: () => setState(() {
                     _intentos++;
+                    // Acá sí conviene recrear el Stream (a diferencia de un
+                    // rebuild cualquiera): el usuario está reportando que
+                    // la suscripción actual no sirve, así que vale la pena
+                    // levantar una nueva desde cero.
+                    _stream = context.read<PagoProvider>().porDeuda(deuda.id);
                     _programarTimeoutPrimeraCarga();
                   }),
                   child: const Text('Reintentar'),
@@ -1305,6 +1361,12 @@ class _RegistrarPagoDialogState extends State<_RegistrarPagoDialog> {
   bool _guardando = false;
   bool _mostrarErrorMedioPago = false;
 
+  /// Cotización resuelta por `CotizacionBlueField` (automática o cargada a
+  /// mano), solo relevante cuando `widget.deuda.esVentaFinanciada`. Se
+  /// guarda junto con el pago para que reportes_screen.dart pueda
+  /// convertirlo a USD con el valor de ESE día.
+  double? _tasaBlue;
+
   @override
   void dispose() {
     _montoCtrl.dispose();
@@ -1327,7 +1389,13 @@ class _RegistrarPagoDialogState extends State<_RegistrarPagoDialog> {
     final formValido = _formKey.currentState!.validate();
     final medioPago = _medioPago;
     setState(() => _mostrarErrorMedioPago = medioPago == null);
+    // En una venta financiada hace falta la cotización (automática o
+    // cargada a mano) para poder reconocer la ganancia en USD; sin eso el
+    // pago quedaría afuera del cálculo en Reportes.
+    final necesitaTasaBlue = widget.deuda.esVentaFinanciada;
+    final tasaBlue = _tasaBlue;
     if (!formValido || medioPago == null) return;
+    if (necesitaTasaBlue && (tasaBlue == null || tasaBlue <= 0)) return;
 
     setState(() => _guardando = true);
     final monto = double.parse(_montoCtrl.text.trim().replaceAll(',', '.'));
@@ -1338,6 +1406,7 @@ class _RegistrarPagoDialogState extends State<_RegistrarPagoDialog> {
             monto,
             nota: _notaCtrl.text.trim(),
             medioPago: medioPago.name,
+            tasaBlue: necesitaTasaBlue ? tasaBlue : null,
           );
       if (mounted) {
         Navigator.of(context).pop();
@@ -1414,6 +1483,10 @@ class _RegistrarPagoDialogState extends State<_RegistrarPagoDialog> {
                   ),
                 ),
               ),
+            if (widget.deuda.esVentaFinanciada) ...[
+              const SizedBox(height: 12),
+              CotizacionBlueField(onTasaResuelta: (tasa) => setState(() => _tasaBlue = tasa)),
+            ],
             const SizedBox(height: 12),
             TextFormField(
               controller: _notaCtrl,
@@ -1689,21 +1762,43 @@ class _ClienteFormDialogState extends State<_ClienteFormDialog> {
 /// seleccionar un cliente existente).
 const _nuevoClienteValor = '__nuevo_cliente__';
 
-class _DeudaFormSheet extends StatefulWidget {
+/// Es público para poder abrirse también desde `iphones_screen.dart` /
+/// `android_screen.dart` al marcar un equipo como "vendido financiado (en
+/// cuotas)": en ese caso llega prellenado con el monto/concepto/fecha de la
+/// venta y con [idEquipoVinculado]/[tipoEquipoVinculado] cargados, así el
+/// usuario solo tiene que elegir o crear el cliente y confirmar.
+class DeudaFormSheet extends StatefulWidget {
   final TipoDeuda tipoInicial;
   final DeudaModel? deuda;
-  const _DeudaFormSheet({required this.tipoInicial, this.deuda});
+  final String? montoInicial;
+  final String? conceptoInicial;
+  final DateTime? fechaInicial;
+  final String? idEquipoVinculado;
+  final String? tipoEquipoVinculado;
+
+  const DeudaFormSheet({
+    super.key,
+    required this.tipoInicial,
+    this.deuda,
+    this.montoInicial,
+    this.conceptoInicial,
+    this.fechaInicial,
+    this.idEquipoVinculado,
+    this.tipoEquipoVinculado,
+  });
 
   @override
-  State<_DeudaFormSheet> createState() => _DeudaFormSheetState();
+  State<DeudaFormSheet> createState() => DeudaFormSheetState();
 }
 
-class _DeudaFormSheetState extends State<_DeudaFormSheet> {
+class DeudaFormSheetState extends State<DeudaFormSheet> {
   final _formKey = GlobalKey<FormState>();
   late final _numeroDeudaCtrl = TextEditingController(text: widget.deuda?.numeroDeuda ?? '');
-  late final _conceptoCtrl = TextEditingController(text: widget.deuda?.concepto ?? '');
-  late final _montoTotalCtrl =
-      TextEditingController(text: widget.deuda?.montoTotal.toStringAsFixed(0) ?? '');
+  late final _conceptoCtrl =
+      TextEditingController(text: widget.deuda?.concepto ?? widget.conceptoInicial ?? '');
+  late final _montoTotalCtrl = TextEditingController(
+    text: widget.deuda?.montoTotal.toStringAsFixed(0) ?? widget.montoInicial ?? '',
+  );
   late final _notaCtrl = TextEditingController(text: widget.deuda?.nota ?? '');
 
   /// Teléfono del cliente seleccionado. Vive acá (no solo en el diálogo de
@@ -1724,6 +1819,16 @@ class _DeudaFormSheetState extends State<_DeudaFormSheet> {
   bool _guardando = false;
   bool _mostrarErrorCliente = false;
 
+  /// Equipo vinculado a esta cuenta (venta financiada), codificado como
+  /// `'iphone:<id>'` / `'android:<id>'`, o `null` si es una cuenta manual
+  /// sin equipo asociado. Se puede elegir/corregir acá -no solo llega
+  /// prellenado desde `_MarcarVendidoDialog`- para poder arreglar a mano
+  /// una cuenta que quedó sin vincular (por ejemplo, si se canceló ese
+  /// paso al vender, o si el toggle "Venta financiada" no se activó a
+  /// tiempo): mientras no esté vinculada, Reportes la trata como venta de
+  /// contado por más que en la práctica sea una financiación en curso.
+  String? _equipoVinculadoValor;
+
   bool get _esEdicion => widget.deuda != null;
 
   ClienteModel? _buscarClienteEnCache(String? id) {
@@ -1738,8 +1843,12 @@ class _DeudaFormSheetState extends State<_DeudaFormSheet> {
   void initState() {
     super.initState();
     _tipo = widget.deuda?.tipo ?? widget.tipoInicial;
-    _fecha = widget.deuda?.fechaEmision ?? DateTime.now();
+    _fecha = widget.deuda?.fechaEmision ?? widget.fechaInicial ?? DateTime.now();
     _idClienteSeleccionado = widget.deuda?.idCliente;
+
+    final idEquipo = widget.deuda?.idEquipoVinculado ?? widget.idEquipoVinculado;
+    final tipoEquipo = widget.deuda?.tipoEquipoVinculado ?? widget.tipoEquipoVinculado;
+    _equipoVinculadoValor = (idEquipo != null && tipoEquipo != null) ? '$tipoEquipo:$idEquipo' : null;
 
     if (!_esEdicion) {
       // Sugerencia autogenerada; el usuario puede sobrescribirla a mano.
@@ -1840,6 +1949,9 @@ class _DeudaFormSheetState extends State<_DeudaFormSheet> {
     final base = widget.deuda;
     final montoTotal = double.parse(_montoTotalCtrl.text.trim().replaceAll(',', '.'));
     final montoAbonado = base?.montoAbonado ?? 0;
+    // Formato 'tipo:id' (ver _equipoVinculadoValor); los ids de Firestore
+    // no llevan ':', así que partir por el primero alcanza.
+    final partesEquipo = _equipoVinculadoValor?.split(':');
     final cuenta = DeudaModel(
       id: base?.id ?? '',
       idCliente: idCliente,
@@ -1854,6 +1966,8 @@ class _DeudaFormSheetState extends State<_DeudaFormSheet> {
       fechaPago: base?.fechaPago,
       numeroDeuda: _numeroDeudaCtrl.text.trim(),
       nota: _notaCtrl.text.trim(),
+      idEquipoVinculado: partesEquipo?[1],
+      tipoEquipoVinculado: partesEquipo?[0],
     );
 
     try {
@@ -1882,7 +1996,11 @@ class _DeudaFormSheetState extends State<_DeudaFormSheet> {
       }
 
       if (mounted) {
-        Navigator.of(context).pop();
+        // `true` avisa a quien abrió este formulario (por ejemplo,
+        // `_MarcarVendidoDialog` al vender financiado) que la cuenta quedó
+        // guardada -y, si corresponde, vinculada al equipo-, para poder
+        // distinguirlo de un cierre sin guardar (deslizar hacia abajo).
+        Navigator.of(context).pop(true);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(_esEdicion ? 'Cuenta actualizada' : 'Cuenta agregada')),
         );
@@ -2077,6 +2195,11 @@ class _DeudaFormSheetState extends State<_DeudaFormSheet> {
                   ),
                 ],
                 const SizedBox(height: 12),
+                _SelectorEquipoVinculado(
+                  valorSeleccionado: _equipoVinculadoValor,
+                  onChanged: (valor) => setState(() => _equipoVinculadoValor = valor),
+                ),
+                const SizedBox(height: 12),
                 InkWell(
                   onTap: _elegirFecha,
                   child: InputDecorator(
@@ -2108,6 +2231,82 @@ class _DeudaFormSheetState extends State<_DeudaFormSheet> {
           );
         },
       ),
+    );
+  }
+}
+
+/// Selector de "¿a qué equipo corresponde esta cuenta?", dentro de
+/// [DeudaFormSheet]. Sirve tanto para el prellenado automático al vender un
+/// equipo como financiado, como para vincular (o corregir el vínculo de)
+/// una cuenta manual a mano después -por ejemplo, si el paso de crear la
+/// cuenta se canceló al vender, o si el toggle "Venta financiada" no se
+/// activó a tiempo-. Mientras una cuenta no esté vinculada a ningún equipo,
+/// Reportes la trata como si no existiera esa venta financiada.
+class _SelectorEquipoVinculado extends StatelessWidget {
+  final String? valorSeleccionado;
+  final ValueChanged<String?> onChanged;
+
+  const _SelectorEquipoVinculado({required this.valorSeleccionado, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final iphoneProvider = context.watch<IPhoneStockProvider>();
+    final androidProvider = context.watch<AndroidProvider>();
+
+    return StreamBuilder<List<IPhoneModel>>(
+      stream: iphoneProvider.stream,
+      builder: (context, snapIphones) {
+        return StreamBuilder<List<AndroidModel>>(
+          stream: androidProvider.stream,
+          builder: (context, snapAndroids) {
+            final iphones =
+                (snapIphones.data ?? const <IPhoneModel>[]).where((e) => e.vendido).toList();
+            final androids =
+                (snapAndroids.data ?? const <AndroidModel>[]).where((e) => e.vendido).toList();
+
+            final opciones = <DropdownMenuItem<String?>>[
+              const DropdownMenuItem(value: null, child: Text('Ninguno (cuenta manual)')),
+              ...iphones.map(
+                (e) => DropdownMenuItem(
+                  value: 'iphone:${e.id}',
+                  child: Text(
+                    'iPhone ${e.modelo} ${e.capacidad} · IMEI ${e.imei}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+              ...androids.map(
+                (e) => DropdownMenuItem(
+                  value: 'android:${e.id}',
+                  child: Text(
+                    '${e.marca} ${e.modelo} · ${e.almacenamiento}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ];
+            // Si el equipo vinculado ya no está en el stock (se eliminó),
+            // no aparece en las opciones; se cae a "Ninguno" en vez de
+            // romper el Dropdown con un valor inexistente.
+            final valorValido =
+                opciones.any((o) => o.value == valorSeleccionado) ? valorSeleccionado : null;
+
+            return DropdownButtonFormField<String?>(
+              key: ValueKey('equipo-${valorValido ?? 'ninguno'}'),
+              initialValue: valorValido,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: '¿Corresponde a la venta de un equipo? (opcional)',
+                helperText: 'Vinculalo si es una venta financiada, para que Reportes '
+                    'reconozca la ganancia recién al cobrarla',
+                helperMaxLines: 2,
+              ),
+              items: opciones,
+              onChanged: onChanged,
+            );
+          },
+        );
+      },
     );
   }
 }
