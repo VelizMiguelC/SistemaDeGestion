@@ -31,6 +31,13 @@
 
   <title>inventario_app</title>
   <link rel="manifest" href="manifest.json">
+
+  <!--
+    Convierte fotos HEIC (el formato que usa la cámara del iPhone por
+    default) a JPEG antes de subirlas: ningún navegador sabe decodificar
+    HEIC nativamente. La usa lib/services/heic_converter/heic_converter_web.dart.
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 </head>
 <body>
   <!--

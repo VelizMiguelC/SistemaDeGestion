@@ -2,6 +2,19 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 
+import 'heic_converter/heic_converter.dart' as heic;
+
+/// Se tira cuando una foto no se puede subir por su formato, con un mensaje
+/// ya redactado para mostrárselo directo al usuario -sin `Exception:` ni
+/// texto técnico adelante-.
+class FormatoNoSoportadoException implements Exception {
+  final String mensaje;
+  FormatoNoSoportadoException(this.mensaje);
+
+  @override
+  String toString() => mensaje;
+}
+
 /// Sube y borra las fotos de un equipo (iPhone o Android) en Firebase
 /// Storage.
 ///
@@ -22,13 +35,10 @@ class EquipoFotosService {
     return _picker.pickMultiImage(imageQuality: 70, maxWidth: 1600);
   }
 
-  /// Un iPhone guarda las fotos en HEIC por default. Ningún navegador sabe
-  /// mostrar ese formato (ni tampoco, después, WhatsApp al mandarla a un
-  /// Android desde el bot), así que se rechaza antes de subir en vez de
-  /// dejar una foto rota en el equipo. El propio `imageQuality` del picker
-  /// no la convierte: en la web no hay forma de decodificar HEIC para
-  /// recomprimirla, porque el navegador tampoco puede leerla.
-  bool esFormatoNoSoportado(XFile archivo) {
+  /// Un iPhone guarda las fotos en HEIC por default, formato que ningún
+  /// navegador puede decodificar. `subirFoto` la convierte a JPEG sola
+  /// antes de subirla; esto solo sirve para detectar el caso.
+  bool esHeic(XFile archivo) {
     final mime = archivo.mimeType?.toLowerCase() ?? '';
     if (mime.contains('heic') || mime.contains('heif')) return true;
     final nombre = archivo.name.toLowerCase();
@@ -36,15 +46,36 @@ class EquipoFotosService {
   }
 
   /// Sube una foto ya elegida y devuelve la URL pública de descarga.
+  /// Si es HEIC, la convierte a JPEG antes -ver [heic.convertirHeicAJpeg]-.
   Future<String> subirFoto({required String carpeta, required XFile archivo}) async {
-    final bytes = await archivo.readAsBytes();
-    final extension = _extensionDe(archivo.name);
-    final ref = _storage.ref('equipos/$carpeta/${_uuid.v4()}.$extension');
+    var bytes = await archivo.readAsBytes();
+    var contentType = archivo.mimeType ?? 'image/jpeg';
+    var extension = _extensionDe(archivo.name);
 
-    await ref.putData(
-      bytes,
-      SettableMetadata(contentType: archivo.mimeType ?? 'image/jpeg'),
-    );
+    if (esHeic(archivo)) {
+      if (!heic.puedeConvertirHeic) {
+        throw FormatoNoSoportadoException(
+          '"${archivo.name}" está en formato HEIC (el que usa la cámara del '
+          'iPhone por default) y esta versión de la app no lo puede convertir. '
+          'Cambiá el formato de cámara del iPhone a "Más compatible" en '
+          'Ajustes → Cámara → Formatos, o convertila a JPG antes de subirla.',
+        );
+      }
+      try {
+        bytes = await heic.convertirHeicAJpeg(bytes);
+      } catch (e) {
+        throw FormatoNoSoportadoException(
+          'No se pudo convertir "${archivo.name}" de HEIC a JPG ($e). '
+          'Probá cambiando el formato de cámara del iPhone a "Más compatible" '
+          'en Ajustes → Cámara → Formatos.',
+        );
+      }
+      contentType = 'image/jpeg';
+      extension = 'jpg';
+    }
+
+    final ref = _storage.ref('equipos/$carpeta/${_uuid.v4()}.$extension');
+    await ref.putData(bytes, SettableMetadata(contentType: contentType));
     return ref.getDownloadURL();
   }
 

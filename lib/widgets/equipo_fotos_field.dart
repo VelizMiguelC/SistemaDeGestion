@@ -52,32 +52,22 @@ class _EquipoFotosFieldState extends State<EquipoFotosField> {
     if (elegidas.isEmpty) return;
 
     // Se suben de a una: así el spinner de cada tarjeta refleja el progreso
-    // real en vez de que todas terminen juntas al final.
+    // real en vez de que todas terminen juntas al final. Si es HEIC, la
+    // conversión a JPEG pasa adentro de subirFoto: acá no hace falta saberlo.
     for (final archivo in elegidas) {
-      if (_service.esFormatoNoSoportado(archivo)) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                '"${archivo.name}" está en formato HEIC (el que usa la cámara del iPhone por '
-                'default) y no se puede mostrar. Elegí "Compartir → Guardar en Archivos" y '
-                'convertila a JPG, o cambiá el formato de la cámara en el iPhone: Ajustes → '
-                'Cámara → Formatos → "Más compatible".',
-              ),
-              duration: const Duration(seconds: 8),
-            ),
-          );
-        }
-        continue;
-      }
       setState(() => _subiendo.add(archivo));
       try {
         final url = await _service.subirFoto(carpeta: widget.carpeta, archivo: archivo);
         widget.onChanged([...widget.fotos, url]);
       } catch (e) {
         if (mounted) {
+          // FormatoNoSoportadoException ya trae un mensaje listo para
+          // mostrar; cualquier otro error se envuelve con el nombre del
+          // archivo para dar contexto.
+          final mensaje =
+              e is FormatoNoSoportadoException ? e.mensaje : 'No se pudo subir "${archivo.name}": $e';
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('No se pudo subir "${archivo.name}": $e')),
+            SnackBar(content: Text(mensaje), duration: const Duration(seconds: 8)),
           );
         }
       } finally {
