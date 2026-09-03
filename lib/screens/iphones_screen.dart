@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:uuid/uuid.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../main.dart' show IPhoneStockProvider, AppDrawer;
 import '../models/deuda_model.dart' show TipoDeuda;
 import '../models/iphone_model.dart';
+import '../widgets/equipo_fotos_field.dart';
 import '../widgets/cotizacion_blue_field.dart';
 import 'finanzas_screen.dart' show DeudaFormSheet;
 
@@ -892,6 +894,12 @@ class IPhoneFormSheetState extends State<IPhoneFormSheet> {
   late final _porcentajeSocioCtrl =
       TextEditingController(text: widget.iphone?.porcentajeSocio?.toStringAsFixed(0) ?? '');
 
+  late List<String> _fotos = List.of(widget.iphone?.fotos ?? const []);
+  // Identificador para agrupar las fotos de este equipo en Storage. No hace
+  // falta que coincida con el IMEI: es solo para no mezclar archivos entre
+  // equipos distintos.
+  final String _carpetaFotos = const Uuid().v4();
+
   late EstadoIPhone _estado = widget.iphone?.estado ?? EstadoIPhone.usado;
   late bool _esCompartido = widget.iphone?.esCompartido ?? false;
   late int _mesesGarantia = widget.iphone?.mesesGarantia ?? 3;
@@ -993,6 +1001,7 @@ class IPhoneFormSheetState extends State<IPhoneFormSheet> {
       fechaVenta: base?.fechaVenta,
       telefonoCliente: base?.telefonoCliente,
       mesesGarantia: _mesesGarantia,
+      fotos: _fotos,
     );
 
     try {
@@ -1127,7 +1136,13 @@ class IPhoneFormSheetState extends State<IPhoneFormSheet> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 16),
+                EquipoFotosField(
+                  fotos: _fotos,
+                  carpeta: _carpetaFotos,
+                  onChanged: (fotos) => setState(() => _fotos = fotos),
+                ),
+                const SizedBox(height: 16),
                 TextFormField(
                   controller: _costoCtrl,
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),

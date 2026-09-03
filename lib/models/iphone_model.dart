@@ -78,6 +78,12 @@ class IPhoneModel {
   final DateTime? fechaVenta; // Fecha en la que se vendió el equipo
   final String? telefonoCliente; // Contacto del cliente que lo compró
 
+  /// URLs de las fotos del equipo, subidas a Firebase Storage. El bot de
+  /// WhatsApp las lee tal cual para mandárselas a un cliente que las pida:
+  /// no son para uso interno, así que solo deberían subirse fotos que se
+  /// puedan mostrar a un cliente.
+  final List<String> fotos;
+
   const IPhoneModel({
     required this.id,
     required this.imei,
@@ -95,6 +101,7 @@ class IPhoneModel {
     this.mesesGarantia = 0,
     this.fechaVenta,
     this.telefonoCliente,
+    this.fotos = const [],
   });
 
   /// Ganancia (precioVenta - costo), en USD. `null` si todavía no se definió
@@ -162,6 +169,7 @@ class IPhoneModel {
           ? (map['fechaVenta'] as Timestamp).toDate()
           : null,
       telefonoCliente: map['telefonoCliente'],
+      fotos: (map['fotos'] as List?)?.map((e) => e.toString()).toList() ?? const [],
     );
   }
 
@@ -187,6 +195,7 @@ class IPhoneModel {
       'mesesGarantia': mesesGarantia,
       'fechaVenta': fechaVenta != null ? Timestamp.fromDate(fechaVenta!) : null,
       'telefonoCliente': telefonoCliente,
+      'fotos': fotos,
     };
   }
 
@@ -207,6 +216,7 @@ class IPhoneModel {
     int? mesesGarantia,
     DateTime? fechaVenta,
     String? telefonoCliente,
+    List<String>? fotos,
   }) {
     return IPhoneModel(
       id: id ?? this.id,
@@ -225,6 +235,7 @@ class IPhoneModel {
       mesesGarantia: mesesGarantia ?? this.mesesGarantia,
       fechaVenta: fechaVenta ?? this.fechaVenta,
       telefonoCliente: telefonoCliente ?? this.telefonoCliente,
+      fotos: fotos ?? this.fotos,
     );
   }
 }

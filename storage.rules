@@ -1,0 +1,21 @@
+rules_version = '2';
+
+// Mismo criterio que firestore.rules: esta app es de un solo dueño (Miguel),
+// así que "autenticado con Firebase Auth" ES el control de acceso completo
+// -no hay roles ni datos de terceros que separar-.
+//
+// El bot de WhatsApp NO escribe acá: solo lee las URLs de descarga ya
+// guardadas en Firestore (equipo.fotos), que son públicas una vez generadas
+// por getDownloadURL(). Esta regla protege que nadie más pueda SUBIR o
+// BORRAR fotos, no que nadie pueda verlas -por diseño, para poder
+// mandárselas a un cliente por WhatsApp sin autenticar cada pedido-.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /equipos/{carpeta}/{archivo} {
+      allow read: if true;
+      allow write: if request.auth != null
+        && request.resource.size < 15 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+  }
+}

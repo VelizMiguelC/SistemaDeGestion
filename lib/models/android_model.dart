@@ -84,6 +84,12 @@ class AndroidModel {
   final DateTime? fechaVenta; // Fecha en la que se vendió el equipo
   final String? telefonoCliente; // Contacto del cliente que lo compró
 
+  /// URLs de las fotos del equipo, subidas a Firebase Storage. El bot de
+  /// WhatsApp las lee tal cual para mandárselas a un cliente que las pida:
+  /// no son para uso interno, así que solo deberían subirse fotos que se
+  /// puedan mostrar a un cliente.
+  final List<String> fotos;
+
   const AndroidModel({
     required this.id,
     required this.marca,
@@ -102,6 +108,7 @@ class AndroidModel {
     this.mesesGarantia = 0,
     this.fechaVenta,
     this.telefonoCliente,
+    this.fotos = const [],
   });
 
   /// Ganancia (precioVenta - costo), en USD. `null` si todavía no se definió
@@ -170,6 +177,7 @@ class AndroidModel {
           ? (map['fechaVenta'] as Timestamp).toDate()
           : null,
       telefonoCliente: map['telefonoCliente'],
+      fotos: (map['fotos'] as List?)?.map((e) => e.toString()).toList() ?? const [],
     );
   }
 
@@ -196,6 +204,7 @@ class AndroidModel {
       'mesesGarantia': mesesGarantia,
       'fechaVenta': fechaVenta != null ? Timestamp.fromDate(fechaVenta!) : null,
       'telefonoCliente': telefonoCliente,
+      'fotos': fotos,
     };
   }
 
@@ -217,6 +226,7 @@ class AndroidModel {
     int? mesesGarantia,
     DateTime? fechaVenta,
     String? telefonoCliente,
+    List<String>? fotos,
   }) {
     return AndroidModel(
       id: id ?? this.id,
@@ -236,6 +246,7 @@ class AndroidModel {
       mesesGarantia: mesesGarantia ?? this.mesesGarantia,
       fechaVenta: fechaVenta ?? this.fechaVenta,
       telefonoCliente: telefonoCliente ?? this.telefonoCliente,
+      fotos: fotos ?? this.fotos,
     );
   }
 }
