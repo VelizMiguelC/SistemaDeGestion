@@ -66,5 +66,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Para elegir las fotos del equipo que se muestran a los clientes.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Para sacarle una foto al equipo directo desde la app.</string>
 </dict>
 </plist>
