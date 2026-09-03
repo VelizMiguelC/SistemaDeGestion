@@ -22,6 +22,19 @@ class EquipoFotosService {
     return _picker.pickMultiImage(imageQuality: 70, maxWidth: 1600);
   }
 
+  /// Un iPhone guarda las fotos en HEIC por default. Ningún navegador sabe
+  /// mostrar ese formato (ni tampoco, después, WhatsApp al mandarla a un
+  /// Android desde el bot), así que se rechaza antes de subir en vez de
+  /// dejar una foto rota en el equipo. El propio `imageQuality` del picker
+  /// no la convierte: en la web no hay forma de decodificar HEIC para
+  /// recomprimirla, porque el navegador tampoco puede leerla.
+  bool esFormatoNoSoportado(XFile archivo) {
+    final mime = archivo.mimeType?.toLowerCase() ?? '';
+    if (mime.contains('heic') || mime.contains('heif')) return true;
+    final nombre = archivo.name.toLowerCase();
+    return nombre.endsWith('.heic') || nombre.endsWith('.heif');
+  }
+
   /// Sube una foto ya elegida y devuelve la URL pública de descarga.
   Future<String> subirFoto({required String carpeta, required XFile archivo}) async {
     final bytes = await archivo.readAsBytes();

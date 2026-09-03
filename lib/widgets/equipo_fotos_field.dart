@@ -54,6 +54,22 @@ class _EquipoFotosFieldState extends State<EquipoFotosField> {
     // Se suben de a una: así el spinner de cada tarjeta refleja el progreso
     // real en vez de que todas terminen juntas al final.
     for (final archivo in elegidas) {
+      if (_service.esFormatoNoSoportado(archivo)) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '"${archivo.name}" está en formato HEIC (el que usa la cámara del iPhone por '
+                'default) y no se puede mostrar. Elegí "Compartir → Guardar en Archivos" y '
+                'convertila a JPG, o cambiá el formato de la cámara en el iPhone: Ajustes → '
+                'Cámara → Formatos → "Más compatible".',
+              ),
+              duration: const Duration(seconds: 8),
+            ),
+          );
+        }
+        continue;
+      }
       setState(() => _subiendo.add(archivo));
       try {
         final url = await _service.subirFoto(carpeta: widget.carpeta, archivo: archivo);
