@@ -142,15 +142,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       return StreamBuilder<List<GastoModel>>(
                         stream: gastoProvider.stream,
                         builder: (context, snapGastos) {
-                          final cargando = !snapIphones.hasData ||
-                              !snapAndroids.hasData ||
-                              !snapAccesorios.hasData ||
-                              !snapDeudas.hasData ||
-                              !snapGastos.hasData;
-                          if (cargando) {
-                            return const Center(child: CircularProgressIndicator());
-                          }
-
+                          // El error se revisa ANTES que "está cargando": un stream
+                          // que falla nunca llega a tener datos (hasData queda en
+                          // false para siempre), así que si el orden fuera al revés
+                          // esta pantalla se quedaría en el spinner de carga sin fin
+                          // y el mensaje de error de abajo jamás se mostraría.
                           final error = snapIphones.error ??
                               snapAndroids.error ??
                               snapAccesorios.error ??
@@ -158,6 +154,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               snapGastos.error;
                           if (error != null) {
                             return Center(child: Text('Error al cargar el dashboard: $error'));
+                          }
+
+                          final cargando = !snapIphones.hasData ||
+                              !snapAndroids.hasData ||
+                              !snapAccesorios.hasData ||
+                              !snapDeudas.hasData ||
+                              !snapGastos.hasData;
+                          if (cargando) {
+                            return const Center(child: CircularProgressIndicator());
                           }
 
                           return _DashboardBody(
